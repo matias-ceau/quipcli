@@ -14,6 +14,7 @@ from .models import _load_models, _load_models_full, _ranking_for
 
 _CONFIG_KEYS = [
     "default_model",
+    "reasoning_effort",
     "chat_system_prompt",
     "execute_system_prompt",
     "code_system_prompt",
@@ -267,6 +268,26 @@ def _config_view() -> None:
                     file=sys.stderr,
                 )
                 cfg["ollama_model"] = _edit_text_value(cfg.get("ollama_model") or "")
+                _save_config(cfg)
+        elif key == "reasoning_effort":
+            current = cfg.get("reasoning_effort") or ""
+            options = ["(model default)", *constants.REASONING_EFFORTS]
+            lines = [
+                ("* " if o == (current or "(model default)") else "  ") + o
+                for o in options
+            ]
+            picked_line = _run_fzf(
+                lines,
+                header="enter  pick   esc  back",
+                prompt="effort> ",
+                border_label="qp · reasoning effort",
+            )
+            if picked_line is not None:
+                picked = _model_id_from_line(picked_line)
+                if picked == "(model default)":
+                    cfg.pop("reasoning_effort", None)
+                else:
+                    cfg["reasoning_effort"] = picked
                 _save_config(cfg)
         elif key in _PROMPT_KEYS:
             cfg[key] = _edit_text_value(cfg.get(key) or "")
