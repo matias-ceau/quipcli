@@ -24,6 +24,7 @@ def run_agent_loop(
     max_steps: int = _DEFAULT_MAX_STEPS,
     server_tools: bool = True,
     render_markdown: bool = True,
+    extra: dict | None = None,
 ) -> tuple[str, _UsageStats | None]:
     tools = default_tools(include_server_tools=server_tools)
     total_prompt = 0
@@ -34,7 +35,7 @@ def run_agent_loop(
 
     for step in range(max_steps):
         resp, used_model = _make_request(
-            messages, model, stream=False, extra={"tools": tools},
+            messages, model, stream=False, extra={"tools": tools, **(extra or {})},
         )
         raw = resp.read().decode(errors="replace")
         try:

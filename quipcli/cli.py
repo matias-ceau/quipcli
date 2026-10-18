@@ -2,6 +2,7 @@ import argparse
 import os
 import sys
 
+from . import constants
 from .config import DEFAULT_MODEL
 from .constants import DEFAULT_EXECUTE_SYSTEM_PROMPT
 from .db import _UsageStats
@@ -26,7 +27,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="qp",
         description="Ask questions or run AI-generated shell commands — no quotes needed.",
-        usage="%(prog)s [-e|-c|-a] [-m MODEL] [-S SYSTEM] [-s SESSION|-f] [-i FILE] [-q] [words ...]",
+        usage="%(prog)s [-e|-c|-a] [-m MODEL] [-r EFFORT] [-S SYSTEM] [-s SESSION|-f] [-i FILE] [-q] [words ...]",
     )
     parser.add_argument(
         "words",
@@ -65,6 +66,14 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_MODEL,
         metavar="MODEL",
         help=f"Model to use (default: {DEFAULT_MODEL} or $LLM_CMD_MODEL).",
+    )
+    parser.add_argument(
+        "-r", "--reasoning",
+        default=None,
+        choices=constants.REASONING_EFFORTS,
+        metavar="EFFORT",
+        help="Reasoning effort for this call: " + ", ".join(constants.REASONING_EFFORTS)
+             + " (default: config \"reasoning_effort\", else the model's own default).",
     )
     parser.add_argument(
         "-S", "--system",

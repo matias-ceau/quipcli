@@ -12,7 +12,10 @@ qp — quick reference
   qp -m anthropic/claude-3 ...         use a specific model
   qp -m openrouter/auto-beta ...       Auto Router: picks a model per-prompt
   qp -m openrouter/pareto-code -c ...  Pareto Router: best coder for the price
-  qp -q ...                            suppress usage stats
+  qp -r low ...                        reasoning effort for this call
+                                        (max/xhigh/high/medium/low/minimal/none;
+                                        persistent: config "reasoning_effort")
+  qp -q ...                            suppress usage stats (and reasoning display)
   NO_COLOR=1 qp ...                    disable ANSI markdown styling
   qp -s myconv ask something           start or continue a named session
   qp -s auto ask something             auto-named session (name shown on stderr)
@@ -96,6 +99,20 @@ OPTIONS
                         the resolved id is printed to stderr.
                         Default: $LLM_CMD_MODEL, config file, or openai/gpt-4o-mini.
 
+    -r, --reasoning EFFORT
+                        Reasoning effort for this call, sent as OpenRouter's
+                        reasoning.effort: max, xhigh, high, medium, low,
+                        minimal, none. Default: config "reasoning_effort", else
+                        the model's own default (which can be "max" — e.g.
+                        GLM may think for minutes before answering). Accepted
+                        levels vary per model; "none" is rejected by models
+                        whose reasoning is mandatory; qp warns on stderr
+                        when the model cache says the effort is unsupported
+                        (request still sent). While streaming (chat,
+                        -c), reasoning tokens are shown dimmed on stderr
+                        (TTY only, hidden by -q) so the call never looks
+                        stalled. Ctrl-C at any point exits with status 130.
+
     -S, --system PROMPT Fully override the system prompt (skips machine context
                         and config "system_prompt" injection — use this for a
                         one-off, exact system message).
@@ -109,8 +126,9 @@ OPTIONS
     -i, --input FILE    Explicitly pass a file as multimodal input. Repeatable.
                         Files are also auto-detected from words by extension.
 
-    -q, --quiet         Suppress post-response usage stats (model, tokens, cost)
-                        and the informational Model:/Session: stderr lines.
+    -q, --quiet         Suppress post-response usage stats (model, tokens, cost),
+                        the informational Model:/Session: stderr lines, and
+                        the dimmed reasoning display.
 
     --update-models     Fetch and cache the model list from the provider, then exit.
 
@@ -228,10 +246,13 @@ TUI (--tui)
                highlighted model as the new default. ctrl-r refreshes the
                cache from the provider in place.
 
-      Config   Fuzzy list of editable keys: default_model, chat_system_prompt,
+      Config   Fuzzy list of editable keys: default_model, reasoning_effort,
+               chat_system_prompt,
                execute_system_prompt, code_system_prompt, agent_system_prompt,
                system_prompt, ollama_model. Right-hand preview shows the live config.json
                via bat. Enter on default_model drills into the Models list;
+               on reasoning_effort, into a list of effort levels (or
+               "(model default)" to remove the key);
                on ollama_model, into a list of locally available Ollama
                models (falls back to free-text entry if Ollama is
                unreachable); on any *_system_prompt key, opens $EDITOR on
@@ -292,6 +313,7 @@ CONTEXT INJECTION
 
 FILES
     ~/.config/quipcli/config.json       Persistent config: default_model,
+                                         reasoning_effort,
                                          chat_system_prompt,
                                          execute_system_prompt,
                                          code_system_prompt,

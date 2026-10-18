@@ -34,7 +34,7 @@ Then `qp -m <Tab>` completes model names. Substring match: typing `haiku` finds 
 ## Usage
 
 ```
-qp [-e] [-c] [-a] [-m MODEL] [-S SYSTEM] [-s SESSION|-f] [-i FILE] [-q] [words ...]
+qp [-e] [-c] [-a] [-m MODEL] [-r EFFORT] [-S SYSTEM] [-s SESSION|-f] [-i FILE] [-q] [words ...]
 ```
 
 | Flag | Description |
@@ -46,9 +46,10 @@ qp [-e] [-c] [-a] [-m MODEL] [-S SYSTEM] [-s SESSION|-f] [-i FILE] [-q] [words .
 | `--max-steps N` | With `-a`: max tool-calling loop iterations (default: 12) |
 | `--no-web` | With `-a`: disable the hosted web search/fetch tools for this call |
 | `-m MODEL` | Override model (default: `openai/gpt-4o-mini`). MODEL may be a substring matching a single cached model, e.g. `-m haiku` |
+| `-r EFFORT` | Reasoning effort for this call (`max`/`xhigh`/`high`/`medium`/`low`/`minimal`/`none`) — see below |
 | `-S PROMPT` | Override system prompt |
 | `-s SESSION` / `-f` | Named session, or follow up on the last one |
-| `-q` | Quiet: suppress usage stats and informational stderr lines |
+| `-q` | Quiet: suppress usage stats, informational stderr lines, and the reasoning display |
 | `--models` [`--in`/`--out`] | List cached models (marked default), filterable by modality |
 | `--model-get` / `--model-set [MODEL]` | Print / set the default model |
 | `--config-edit` | Open `config.json` in `$EDITOR` |
@@ -107,7 +108,7 @@ qp --tui
 Shells out to the real `fzf` (and `bat`, for preview syntax highlighting) — no reimplemented fuzzy-finder, and it inherits your existing `FZF_DEFAULT_OPTS` if you have one.
 
 - **Models** — fuzzy list of cached models, current default marked `*`. The preview pane shows name, context length, price per 1M tokens (prompt/completion), input/output modalities, usage rank (once `qp --update-rankings` has been run), and the model's description from the provider. `Enter` sets the highlighted model as the new default; `ctrl-r` refreshes the cache from the provider without leaving the picker.
-- **Config** — fuzzy list of editable keys (`default_model`, `chat_system_prompt`, `execute_system_prompt`, `code_system_prompt`, `agent_system_prompt`, `system_prompt`, `ollama_model`), with the live `config.json` shown via `bat` on the right. `Enter` on `default_model` drills into the Models list; on `ollama_model`, into a list of locally available Ollama models (falls back to free-text entry if Ollama is unreachable); on any `*_system_prompt` key, opens `$EDITOR` on just that value. `ctrl-e` opens the whole config file in `$EDITOR` at any time.
+- **Config** — fuzzy list of editable keys (`default_model`, `reasoning_effort`, `chat_system_prompt`, `execute_system_prompt`, `code_system_prompt`, `agent_system_prompt`, `system_prompt`, `ollama_model`), with the live `config.json` shown via `bat` on the right. `Enter` on `default_model` drills into the Models list; on `reasoning_effort`, into a list of effort levels (or `(model default)` to remove the key); on `ollama_model`, into a list of locally available Ollama models (falls back to free-text entry if Ollama is unreachable); on any `*_system_prompt` key, opens `$EDITOR` on just that value. `ctrl-e` opens the whole config file in `$EDITOR` at any time.
 
 `Esc` steps back one level; `Esc` at the top menu exits. Requires `fzf` to be installed — `qp --model-set` (no value) also uses this picker when `fzf` is available, falling back to a plain numbered prompt otherwise.
 
@@ -131,6 +132,19 @@ Environment variables always take priority over the config file:
 | `LLM_CMD_API_KEY` | `$OPENROUTER_API_KEY` | Override API key |
 | `LLM_CMD_API_URL` | OpenRouter endpoint | Any OpenAI-compatible URL (http:// endpoints need no key) |
 | `LLM_CMD_OLLAMA_URL` | `http://localhost:11434` | Local Ollama used as offline fallback |
+
+### Reasoning models
+
+Reasoning models (GLM, DeepSeek, Gemini, Claude…) think before answering. `qp` streams those reasoning tokens **dimmed on stderr** as they arrive (TTY only, hidden by `-q`), then the answer on stdout — so a long think never looks like a hang, and piping stdout stays clean. Ctrl-C exits cleanly (status 130), no traceback.
+
+Some models default to a very high effort (e.g. `z-ai/glm-5.3-flash` defaults to `max` and can think for ~2 minutes). Control it with OpenRouter's `reasoning.effort`:
+
+```bash
+qp -r low what does debtap -u do        # one call
+qp --config-edit                         # persistent: "reasoning_effort": "low"
+```
+
+Valid values: `max`, `xhigh`, `high`, `medium`, `low`, `minimal`, `none`. Accepted levels vary per model, and `none` is rejected by models whose reasoning is mandatory. Unset = the model's own default. The `-r` flag wins over the config key. When the model cache says the chosen effort isn't supported, `qp` prints a warning (but still sends the request — the cache may be stale).
 
 ### Persistent instructions + machine context
 

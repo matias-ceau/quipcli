@@ -346,16 +346,30 @@ def _use_markdown_rendering() -> bool:
     return sys.stdout.isatty()
 
 
+def _reasoning_style() -> tuple[str, str]:
+    if os.environ.get("NO_COLOR") is not None:
+        return "", ""
+    return "\033[2m", "\033[0m"
+
+
 def call_llm_streaming(
     messages: list[dict],
     model: str,
     collect_usage: bool = False,
     render_markdown: bool = True,
+    show_reasoning: bool = False,
+    extra: dict | None = None,
 ) -> tuple[str, _UsageStats | None]:
-    resp, model = _make_request(messages, model, stream=True, include_usage=collect_usage)
+    """`show_reasoning` streams the model's `delta.reasoning` tokens dimmed to
+    stderr (TTY only) — without it a reasoning model looks stalled until its
+    first content token, which can take minutes at high effort."""
+    resp, model = _make_request(messages, model, stream=True, include_usage=collect_usage, extra=extra)
     usage_data: dict | None = None
     parts: list[str] = []
     renderer = _MarkdownAnsiRenderer() if render_markdown and _use_markdown_rendering() else None
+    show_reasoning = show_reasoning and sys.stderr.isatty()
+    dim, reset = _reasoning_style()
+    in_reasoning = False
     while line := resp.readline():
         text = line.decode().strip()
         if not text.startswith("data: "):
@@ -367,7 +381,16 @@ def call_llm_streaming(
             chunk = json.loads(payload)
             choices = chunk.get("choices", [])
             if choices:
+                reasoning = choices[0]["delta"].get("reasoning") or ""
+                if reasoning and show_reasoning:
+                    if not in_reasoning:
+                        print(dim, end="", file=sys.stderr)
+                        in_reasoning = True
+                    print(reasoning, end="", file=sys.stderr, flush=True)
                 delta = choices[0]["delta"].get("content", "")
+                if delta and in_reasoning:
+                    print(f"{reset}\n", file=sys.stderr, flush=True)
+                    in_reasoning = False
                 if delta:
                     rendered = renderer.render(delta) if renderer else delta
                     print(rendered, end="", flush=True)
@@ -376,6 +399,8 @@ def call_llm_streaming(
                 usage_data = chunk["usage"]
         except (json.JSONDecodeError, KeyError, IndexError):
             pass
+    if in_reasoning:
+        print(f"{reset}\n", file=sys.stderr, flush=True)
     if renderer:
         tail = renderer.finish()
         if tail:
@@ -395,8 +420,9 @@ def call_llm_streaming(
 def call_llm_capture(
     messages: list[dict],
     model: str,
+    extra: dict | None = None,
 ) -> tuple[str, _UsageStats | None]:
-    resp, model = _make_request(messages, model, stream=False)
+    resp, model = _make_request(messages, model, stream=False, extra=extra)
     raw = resp.read().decode(errors="replace")
     try:
         data = json.loads(raw)

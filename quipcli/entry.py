@@ -11,6 +11,7 @@ from .execute import confirm_and_run
 from .http_client import call_llm_capture, call_llm_streaming
 from .models import (
     _check_modality_support,
+    _check_reasoning_support,
     _fetch_models,
     _fetch_rankings,
     _list_models_by_modality,
@@ -134,6 +135,7 @@ def _do_status() -> None:
     print(f"api_key       : {key_display}")
     print(f"models cached : {n_models} models  ({constants._MODELS_CACHE})")
     print(f"config file   : {constants._CONFIG_FILE}  ({'exists' if constants._CONFIG_FILE.exists() else 'not created'})")
+    print(f"reasoning     : {cfg.get('reasoning_effort') or '(model default)'}")
     print(f"system_prompt : {cfg.get('system_prompt') or '(none)'}")
     print(f"machine ctx   : {_machine_context()}")
     print(f"history db    : {constants._HISTORY_DB}  ({'exists' if constants._HISTORY_DB.exists() else 'not created'})")
@@ -161,7 +163,26 @@ def _do_cost(period: str) -> None:
     print(f"Cost        : {cost_str}")
 
 
+def _reasoning_extra(cli_effort: str | None, cfg: dict) -> dict | None:
+    effort = cli_effort or cfg.get("reasoning_effort")
+    return {"reasoning": {"effort": effort}} if effort else None
+
+
 def main() -> None:
+    try:
+        _main()
+    except KeyboardInterrupt:
+        # Close any dim/markdown ANSI style left open mid-stream, then exit
+        # with the conventional SIGINT status instead of a traceback.
+        if sys.stdout.isatty():
+            print("\033[0m", end="", flush=True)
+        if sys.stderr.isatty():
+            print("\033[0m", end="", file=sys.stderr)
+        print("\nInterrupted.", file=sys.stderr)
+        sys.exit(130)
+
+
+def _main() -> None:
     parser = build_parser()
 
     try:
@@ -261,6 +282,9 @@ def main() -> None:
     _check_modality_support(args.model, detected_mods)
 
     show_stats = not args.quiet and sys.stdout.isatty()
+    extra = _reasoning_extra(args.reasoning, _load_config())
+    if extra:
+        _check_reasoning_support(args.model, extra["reasoning"]["effort"])
 
     def _default_system(mode: str) -> str | None:
         cfg = _load_config()
@@ -286,7 +310,7 @@ def main() -> None:
 
     if args.execute:
         msgs = _build_messages(args.system or _default_system("execute"))
-        cmd, stats = call_llm_capture(msgs, args.model)
+        cmd, stats = call_llm_capture(msgs, args.model, extra=extra)
         _post(cmd, stats, "execute")
         confirm_and_run(cmd, prompt_text)
     elif args.agent:
@@ -296,6 +320,7 @@ def main() -> None:
             args.model,
             max_steps=args.max_steps,
             server_tools=not args.no_web,
+            extra=extra,
         )
         _post(text, stats, "agent")
     elif args.code:
@@ -305,6 +330,8 @@ def main() -> None:
             args.model,
             collect_usage=True,
             render_markdown=False,
+            show_reasoning=not args.quiet,
+            extra=extra,
         )
         _post(text, stats, "code")
     else:
@@ -314,5 +341,7 @@ def main() -> None:
             args.model,
             collect_usage=True,
             render_markdown=True,
+            show_reasoning=not args.quiet,
+            extra=extra,
         )
         _post(text, stats, "chat")

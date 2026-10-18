@@ -187,6 +187,27 @@ def _load_model_arch(model_id: str) -> dict:
     return {}
 
 
+def _check_reasoning_support(model: str, effort: str | None) -> None:
+    """Warn (never exit — the cache may be stale) when the cached model
+    metadata says `effort` won't be accepted. Silent on a cache miss."""
+    if not effort:
+        return
+    entry = next((m for m in _load_models_full() if m.get("id") == model), None)
+    if entry is None:
+        return
+    info = entry.get("reasoning")
+    if not info:
+        print(f"Warning: {model} exposes no reasoning effort control; "
+              f"reasoning effort {effort!r} will likely be ignored.", file=sys.stderr)
+        return
+    supported = info.get("supported_efforts")
+    if effort == "none" and info.get("mandatory"):
+        print(f"Warning: {model} requires reasoning; effort 'none' will be rejected.", file=sys.stderr)
+    elif supported is not None and effort not in supported:
+        print(f"Warning: {model} supports reasoning effort {', '.join(supported)} — "
+              f"not {effort!r}.", file=sys.stderr)
+
+
 def _list_models_by_modality(
     in_mods: list[str] | None = None,
     out_mods: list[str] | None = None,

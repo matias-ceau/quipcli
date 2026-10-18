@@ -1130,6 +1130,120 @@ class TestAgentLoop:
         assert "boom" in capsys.readouterr().err
 
 
+class TestReasoning:
+    def _msgs(self):
+        return [{"role": "user", "content": "hi"}]
+
+    def test_reasoning_extra_cli_wins_over_config(self):
+        from quipcli.entry import _reasoning_extra
+        assert _reasoning_extra("low", {"reasoning_effort": "high"}) == {"reasoning": {"effort": "low"}}
+
+    def test_reasoning_extra_from_config(self):
+        from quipcli.entry import _reasoning_extra
+        assert _reasoning_extra(None, {"reasoning_effort": "high"}) == {"reasoning": {"effort": "high"}}
+
+    def test_reasoning_extra_absent_sends_nothing(self):
+        from quipcli.entry import _reasoning_extra
+        assert _reasoning_extra(None, {}) is None
+        assert _reasoning_extra(None, {"reasoning_effort": ""}) is None
+
+    def test_reasoning_flag_parses(self):
+        args = quipcli.build_parser().parse_args(["-r", "low", "hello"])
+        assert args.reasoning == "low"
+
+    def test_reasoning_flag_rejects_unknown_effort(self):
+        with pytest.raises(SystemExit):
+            quipcli.build_parser().parse_args(["-r", "turbo", "hello"])
+
+    def test_streaming_sends_reasoning_extra(self, mock_http, capsys):
+        http_cls = mock_http(MockHTTPResponse(200, b"", [b"data: [DONE]\n"]))
+        quipcli.call_llm_streaming(self._msgs(), "m", extra={"reasoning": {"effort": "low"}})
+        _, _, body_arg, _ = http_cls.return_value.request.call_args[0]
+        assert json.loads(body_arg)["reasoning"] == {"effort": "low"}
+
+    def test_capture_sends_reasoning_extra(self, mock_http):
+        body = json.dumps({"choices": [{"message": {"content": "ls"}}]}).encode()
+        http_cls = mock_http(MockHTTPResponse(200, body))
+        quipcli.call_llm_capture(self._msgs(), "m", extra={"reasoning": {"effort": "low"}})
+        _, _, body_arg, _ = http_cls.return_value.request.call_args[0]
+        assert json.loads(body_arg)["reasoning"] == {"effort": "low"}
+
+    def _reasoning_lines(self):
+        return [
+            b'data: {"choices":[{"delta":{"content":"","reasoning":"thinking hard"}}]}\n',
+            b'data: {"choices":[{"delta":{"content":"Answer"}}]}\n',
+            b"data: [DONE]\n",
+        ]
+
+    def test_reasoning_shown_on_stderr_not_stdout(self, mock_http, capsys):
+        mock_http(MockHTTPResponse(200, b"", self._reasoning_lines()))
+        with patch("sys.stderr.isatty", return_value=True):
+            text, _ = quipcli.call_llm_streaming(self._msgs(), "m", show_reasoning=True)
+        captured = capsys.readouterr()
+        assert "thinking hard" in captured.err
+        assert "thinking hard" not in captured.out
+        assert text == "Answer"
+
+    def test_reasoning_hidden_when_disabled(self, mock_http, capsys):
+        mock_http(MockHTTPResponse(200, b"", self._reasoning_lines()))
+        with patch("sys.stderr.isatty", return_value=True):
+            quipcli.call_llm_streaming(self._msgs(), "m", show_reasoning=False)
+        assert "thinking hard" not in capsys.readouterr().err
+
+    def test_reasoning_hidden_when_stderr_not_tty(self, mock_http, capsys):
+        mock_http(MockHTTPResponse(200, b"", self._reasoning_lines()))
+        with patch("sys.stderr.isatty", return_value=False):
+            quipcli.call_llm_streaming(self._msgs(), "m", show_reasoning=True)
+        assert "thinking hard" not in capsys.readouterr().err
+
+
+class TestCheckReasoningSupport:
+    def _cache(self, tmp_path, reasoning):
+        f = tmp_path / "models.json"
+        entry = {"id": "m"} if reasoning is None else {"id": "m", "reasoning": reasoning}
+        f.write_text(json.dumps({"data": [entry]}))
+        return f
+
+    def _run(self, tmp_path, reasoning, effort, model="m"):
+        from quipcli.models import _check_reasoning_support
+        with patch("quipcli.constants._MODELS_CACHE", self._cache(tmp_path, reasoning)):
+            _check_reasoning_support(model, effort)
+
+    def test_supported_effort_is_silent(self, tmp_path, capsys):
+        self._run(tmp_path, {"supported_efforts": ["max", "high", "low"]}, "low")
+        assert capsys.readouterr().err == ""
+
+    def test_unsupported_effort_warns(self, tmp_path, capsys):
+        self._run(tmp_path, {"supported_efforts": ["max", "high", "low"]}, "medium")
+        assert "max, high, low" in capsys.readouterr().err
+
+    def test_none_on_mandatory_warns(self, tmp_path, capsys):
+        self._run(tmp_path, {"supported_efforts": None, "mandatory": True}, "none")
+        assert "requires reasoning" in capsys.readouterr().err
+
+    def test_null_supported_efforts_accepts_all(self, tmp_path, capsys):
+        self._run(tmp_path, {"supported_efforts": None}, "minimal")
+        assert capsys.readouterr().err == ""
+
+    def test_non_reasoning_model_warns(self, tmp_path, capsys):
+        self._run(tmp_path, None, "low")
+        assert "no reasoning effort control" in capsys.readouterr().err
+
+    def test_cache_miss_is_silent(self, tmp_path, capsys):
+        self._run(tmp_path, {"supported_efforts": ["low"]}, "high", model="other")
+        assert capsys.readouterr().err == ""
+
+
+class TestMainInterrupt:
+    def test_ctrl_c_exits_130_without_traceback(self, capsys):
+        from quipcli import entry
+        with patch.object(entry, "_main", side_effect=KeyboardInterrupt):
+            with pytest.raises(SystemExit) as exc:
+                entry.main()
+        assert exc.value.code == 130
+        assert "Interrupted." in capsys.readouterr().err
+
+
 class TestMainStatus:
     def test_api_key_masked(self, tmp_path, capsys, monkeypatch):
         monkeypatch.setattr(quipcli.constants, "_CONFIG_DIR", tmp_path)
@@ -1948,6 +2062,7 @@ class TestConfigView:
         keys = [quipcli._key_from_line(l) for l in quipcli._config_lines({})]
         assert keys == [
             "default_model",
+            "reasoning_effort",
             "chat_system_prompt",
             "execute_system_prompt",
             "code_system_prompt",
