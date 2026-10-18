@@ -23,8 +23,11 @@ _CONFIG_KEYS = [
     "ollama_model",
 ]
 _PROMPT_KEYS = {
-    "chat_system_prompt", "execute_system_prompt", "code_system_prompt",
-    "agent_system_prompt", "system_prompt",
+    "chat_system_prompt",
+    "execute_system_prompt",
+    "code_system_prompt",
+    "agent_system_prompt",
+    "system_prompt",
 }
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
@@ -104,7 +107,9 @@ def _run_fzf(
     for bind in extra_binds or []:
         args += ["--bind", bind]
     try:
-        result = subprocess.run(args, input="\n".join(items), capture_output=True, text=True)
+        result = subprocess.run(
+            args, input="\n".join(items), capture_output=True, text=True, check=False
+        )
     except OSError:
         return None
     selected = result.stdout.strip()
@@ -136,10 +141,10 @@ def _print_model_info(line: str) -> None:
         pricing = m.get("pricing") or {}
         arch = m.get("architecture") or {}
 
-        def _per_million(key: str) -> str:
+        def _per_million(key: str, pricing: dict = pricing) -> str:
             try:
                 return f"${float(pricing[key]) * 1_000_000:.2f}"
-            except (KeyError, TypeError, ValueError):
+            except KeyError, TypeError, ValueError:
                 return "n/a"
 
         print(f"id: {model_id}")
@@ -228,7 +233,9 @@ def _config_view() -> None:
             _config_lines(_load_config()),
             header="enter  edit   ctrl-e  open full file in $EDITOR   esc  back",
             preview_cmd=preview,
-            extra_binds=["ctrl-e:execute(qp --config-edit)+reload(qp --_tui-config-lines)"],
+            extra_binds=[
+                "ctrl-e:execute(qp --config-edit)+reload(qp --_tui-config-lines)"
+            ],
             prompt="config> ",
             border_label="qp · config",
         )
@@ -256,13 +263,19 @@ def _config_view() -> None:
                     cfg["ollama_model"] = _model_id_from_line(picked_line)
                     _save_config(cfg)
             else:
-                print("\033[2mOllama unreachable — enter a value manually.\033[0m", file=sys.stderr)
+                print(
+                    "\033[2mOllama unreachable — enter a value manually.\033[0m",
+                    file=sys.stderr,
+                )
                 cfg["ollama_model"] = _edit_text_value(cfg.get("ollama_model") or "")
                 _save_config(cfg)
         elif key == "reasoning_effort":
             current = cfg.get("reasoning_effort") or ""
             options = ["(model default)", *constants.REASONING_EFFORTS]
-            lines = [("* " if o == (current or "(model default)") else "  ") + o for o in options]
+            lines = [
+                ("* " if o == (current or "(model default)") else "  ") + o
+                for o in options
+            ]
             picked_line = _run_fzf(
                 lines,
                 header="enter  pick   esc  back",
@@ -283,7 +296,10 @@ def _config_view() -> None:
 
 def run_tui() -> None:
     if not _fzf_available():
-        print("Error: --tui requires fzf (https://github.com/junegunn/fzf).", file=sys.stderr)
+        print(
+            "Error: --tui requires fzf (https://github.com/junegunn/fzf).",
+            file=sys.stderr,
+        )
         sys.exit(1)
     while True:
         choice = _run_fzf(

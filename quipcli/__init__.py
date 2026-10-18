@@ -14,7 +14,15 @@ from .constants import (
     _MODELS_CACHE,
     _RANKINGS_CACHE,
 )
-from .config import DEFAULT_MODEL, _ensure_config, _load_config, _resolve_default_model, _save_config, _seed_defaults
+from .config import (
+    DEFAULT_MODEL,
+    _ensure_config,
+    _load_config,
+    _model_source,
+    _resolve_default_model,
+    _save_config,
+    _seed_defaults,
+)
 from .context import _machine_context
 from .db import (
     _UsageStats,
@@ -38,7 +46,12 @@ from .models import (
     _resolve_model_name,
 )
 from .multimodal import _build_user_content, _encode_file_content, _is_image_url
-from .http_client import _make_request, _ollama_models, call_llm_capture, call_llm_streaming
+from .http_client import (
+    _make_request,
+    _ollama_models,
+    call_llm_capture,
+    call_llm_streaming,
+)
 from .execute import _edit_in_editor, _edit_text_value, _strip_fences, confirm_and_run
 from .tools import default_tools, execute_tool_call, read_file, run_shell, write_file
 from .agent import run_agent_loop

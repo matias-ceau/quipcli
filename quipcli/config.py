@@ -1,23 +1,36 @@
 import json
 import os
+import sys
 
 from . import constants
 
 _HARDCODED_DEFAULT_MODEL = "openai/gpt-4o-mini"
 
+_warned_bad_config = False
+
 
 def _load_config() -> dict:
+    global _warned_bad_config
     if not constants._CONFIG_FILE.exists():
         return {}
     try:
         return json.loads(constants._CONFIG_FILE.read_text())
-    except (json.JSONDecodeError, OSError):
+    except json.JSONDecodeError, OSError:
+        if not _warned_bad_config:
+            print(
+                f"Warning: {constants._CONFIG_FILE} is invalid JSON, ignoring it "
+                "(falling back to defaults).",
+                file=sys.stderr,
+            )
+            _warned_bad_config = True
         return {}
 
 
 def _save_config(data: dict) -> None:
     constants._CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    constants._atomic_write_text(constants._CONFIG_FILE, json.dumps(data, indent=2) + "\n")
+    constants._atomic_write_text(
+        constants._CONFIG_FILE, json.dumps(data, indent=2) + "\n"
+    )
 
 
 def _ensure_config() -> dict:
@@ -50,6 +63,17 @@ def _resolve_default_model() -> str:
         or _load_config().get("default_model")
         or _HARDCODED_DEFAULT_MODEL
     )
+
+
+def _model_source() -> str:
+    """Where the value _resolve_default_model() would return actually comes
+    from — env checked before config, matching _resolve_default_model's own
+    precedence exactly (do not reorder one without the other)."""
+    if os.environ.get("LLM_CMD_MODEL"):
+        return "env"
+    if _load_config().get("default_model"):
+        return "config"
+    return "default"
 
 
 DEFAULT_MODEL = _resolve_default_model()

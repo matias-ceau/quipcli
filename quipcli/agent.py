@@ -35,7 +35,10 @@ def run_agent_loop(
 
     for step in range(max_steps):
         resp, used_model = _make_request(
-            messages, model, stream=False, extra={"tools": tools, **(extra or {})},
+            messages,
+            model,
+            stream=False,
+            extra={"tools": tools, **(extra or {})},
         )
         raw = resp.read().decode(errors="replace")
         try:
@@ -46,7 +49,10 @@ def run_agent_loop(
         if "error" in data or not data.get("choices"):
             err = data.get("error")
             msg = err.get("message") if isinstance(err, dict) else err
-            print(f"Error: API returned no completion{': ' + str(msg) if msg else '.'}", file=sys.stderr)
+            print(
+                f"Error: API returned no completion{': ' + str(msg) if msg else '.'}",
+                file=sys.stderr,
+            )
             sys.exit(1)
 
         usage = data.get("usage") or {}
@@ -58,7 +64,11 @@ def run_agent_loop(
 
         message = data["choices"][0]["message"]
         messages.append(message)
-        tool_calls = [c for c in (message.get("tool_calls") or []) if c.get("type", "function") == "function"]
+        tool_calls = [
+            c
+            for c in (message.get("tool_calls") or [])
+            if c.get("type", "function") == "function"
+        ]
 
         if not tool_calls:
             text = (message.get("content") or "").strip()
@@ -74,13 +84,18 @@ def run_agent_loop(
         for call in tool_calls:
             fn = call["function"]
             result = execute_tool_call(fn["name"], fn.get("arguments", ""))
-            messages.append({
-                "role": "tool",
-                "tool_call_id": call["id"],
-                "content": result,
-            })
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": call["id"],
+                    "content": result,
+                }
+            )
 
-    print(f"\033[2m⚠ agent: max steps ({max_steps}) reached — returning last response\033[0m", file=sys.stderr)
+    print(
+        f"\033[2m⚠ agent: max steps ({max_steps}) reached — returning last response\033[0m",
+        file=sys.stderr,
+    )
     last = messages[-1] if messages else {}
     text = (last.get("content") or "").strip() if isinstance(last, dict) else ""
     _print_final(text, render_markdown)

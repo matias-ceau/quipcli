@@ -15,7 +15,7 @@ _MAX_OUTPUT_CHARS = 4000
 def _confirm(prompt: str) -> bool:
     try:
         choice = input(prompt).strip().lower()
-    except (EOFError, KeyboardInterrupt):
+    except EOFError, KeyboardInterrupt:
         print("\nAborted.", file=sys.stderr)
         return False
     return choice in ("y", "yes", "")
@@ -34,7 +34,12 @@ def run_shell(args: dict) -> str:
         return "User declined to run this command."
     try:
         result = subprocess.run(
-            command, shell=True, capture_output=True, text=True, timeout=120, check=False,
+            command,
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
         )
     except subprocess.TimeoutExpired:
         return "Error: command timed out after 120s."
@@ -86,7 +91,10 @@ _LOCAL_TOOL_SCHEMAS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "command": {"type": "string", "description": "The shell command to run."},
+                    "command": {
+                        "type": "string",
+                        "description": "The shell command to run.",
+                    },
                 },
                 "required": ["command"],
             },
@@ -122,7 +130,10 @@ _LOCAL_TOOL_SCHEMAS = [
                 "type": "object",
                 "properties": {
                     "path": {"type": "string", "description": "Path to write to."},
-                    "content": {"type": "string", "description": "Full text content to write."},
+                    "content": {
+                        "type": "string",
+                        "description": "Full text content to write.",
+                    },
                 },
                 "required": ["path", "content"],
             },
@@ -155,5 +166,5 @@ def execute_tool_call(name: str, arguments_json: str) -> str:
         return "Error: invalid arguments JSON."
     try:
         return fn(args)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 — any tool failure must become a message, not crash the agent loop
         return f"Error executing tool: {e}"

@@ -20,7 +20,9 @@ class _APIStatusError(Exception):
 def _open_connection(parsed) -> http.client.HTTPConnection:
     if parsed.scheme == "http":
         return http.client.HTTPConnection(parsed.netloc, timeout=30)
-    return http.client.HTTPSConnection(parsed.netloc, context=constants._SSL_CTX, timeout=30)
+    return http.client.HTTPSConnection(
+        parsed.netloc, context=constants._SSL_CTX, timeout=30
+    )
 
 
 def _post_json(url: str, body: str, api_key: str) -> http.client.HTTPResponse:
@@ -54,7 +56,10 @@ def _post_json(url: str, body: str, api_key: str) -> http.client.HTTPResponse:
                 break
         if wait is None:
             break
-        print(f"\033[2m  retrying in {wait}s… ({last_error.splitlines()[0]})\033[0m", file=sys.stderr)
+        print(
+            f"\033[2m  retrying in {wait}s… ({last_error.splitlines()[0]})\033[0m",
+            file=sys.stderr,
+        )
         time.sleep(wait)
     raise _APIStatusError(last_error) if status_error else ConnectionError(last_error)
 
@@ -71,7 +76,7 @@ def _ollama_models() -> list[str] | None:
         data = json.loads(resp.read().decode())
         models = [m["name"] for m in data.get("models", [])]
         return models or None
-    except (OSError, json.JSONDecodeError, KeyError, TypeError):
+    except OSError, json.JSONDecodeError, KeyError, TypeError:
         return None
 
 
@@ -89,8 +94,11 @@ def _ollama_fallback(
     if not models:
         return None
     from .config import _load_config
+
     model = _pick_ollama_model(models, _load_config())
-    print(f"\033[2m⚠ {reason} — falling back to Ollama ({model})\033[0m", file=sys.stderr)
+    print(
+        f"\033[2m⚠ {reason} — falling back to Ollama ({model})\033[0m", file=sys.stderr
+    )
     body = json.dumps({**body_dict, "model": model})
     try:
         resp = _post_json(f"{constants._OLLAMA_URL}/v1/chat/completions", body, "")
@@ -124,8 +132,11 @@ def _make_request(
         result = _ollama_fallback(body_dict, "no API key configured")
         if result:
             return result
-        print("Error: no API key. Set LLM_CMD_API_KEY or OPENROUTER_API_KEY, "
-              "or run a local Ollama.", file=sys.stderr)
+        print(
+            "Error: no API key. Set LLM_CMD_API_KEY or OPENROUTER_API_KEY, "
+            "or run a local Ollama.",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     try:
@@ -232,7 +243,7 @@ class _MarkdownAnsiRenderer:
                 i += 1
                 continue
 
-            if self._line_start and ch in "-*+" and text[i + 1:i + 2] == " ":
+            if self._line_start and ch in "-*+" and text[i + 1 : i + 2] == " ":
                 out.append(self._LIST_MARKER)
                 out.append(ch)
                 out.append(self._RESET)
@@ -267,7 +278,7 @@ class _MarkdownAnsiRenderer:
                     j += 1
                 if j < len(text) and text[j] == " ":
                     out.append(self._HEADING)
-                    out.append(text[i:j + 1])
+                    out.append(text[i : j + 1])
                     self._in_heading = True
                     self._line_start = False
                     self._line_leading_spaces = 4
@@ -316,16 +327,19 @@ class _MarkdownAnsiRenderer:
         if last_newline == -1:
             self._carry = text
             return ""
-        safe = text[:last_newline + 1]
-        self._carry = text[last_newline + 1:]
+        safe = text[: last_newline + 1]
+        self._carry = text[last_newline + 1 :]
         return self._render_text(safe)
 
     def finish(self) -> str:
         tail = self._render_text(self._carry)
         self._carry = ""
         if (
-            self._in_heading or self._in_fenced_code or self._in_inline_code
-            or self._in_bold or self._in_blockquote
+            self._in_heading
+            or self._in_fenced_code
+            or self._in_inline_code
+            or self._in_bold
+            or self._in_blockquote
         ):
             self._in_heading = False
             self._in_fenced_code = False
@@ -363,10 +377,16 @@ def call_llm_streaming(
     """`show_reasoning` streams the model's `delta.reasoning` tokens dimmed to
     stderr (TTY only) — without it a reasoning model looks stalled until its
     first content token, which can take minutes at high effort."""
-    resp, model = _make_request(messages, model, stream=True, include_usage=collect_usage, extra=extra)
+    resp, model = _make_request(
+        messages, model, stream=True, include_usage=collect_usage, extra=extra
+    )
     usage_data: dict | None = None
     parts: list[str] = []
-    renderer = _MarkdownAnsiRenderer() if render_markdown and _use_markdown_rendering() else None
+    renderer = (
+        _MarkdownAnsiRenderer()
+        if render_markdown and _use_markdown_rendering()
+        else None
+    )
     show_reasoning = show_reasoning and sys.stderr.isatty()
     dim, reset = _reasoning_style()
     in_reasoning = False
@@ -397,7 +417,7 @@ def call_llm_streaming(
                     parts.append(delta)
             if collect_usage and "usage" in chunk:
                 usage_data = chunk["usage"]
-        except (json.JSONDecodeError, KeyError, IndexError):
+        except json.JSONDecodeError, KeyError, IndexError:
             pass
     if in_reasoning:
         print(f"{reset}\n", file=sys.stderr, flush=True)
@@ -430,17 +450,24 @@ def call_llm_capture(
         if "error" in data or not data.get("choices"):
             err = data.get("error")
             msg = err.get("message") if isinstance(err, dict) else err
-            print(f"Error: API returned no completion{': ' + str(msg) if msg else '.'}", file=sys.stderr)
+            print(
+                f"Error: API returned no completion{': ' + str(msg) if msg else '.'}",
+                file=sys.stderr,
+            )
             sys.exit(1)
         text = data["choices"][0]["message"]["content"].strip()
-    except (json.JSONDecodeError, KeyError, TypeError, AttributeError):
+    except json.JSONDecodeError, KeyError, TypeError, AttributeError:
         print(f"Error: unexpected API response: {raw[:200]}", file=sys.stderr)
         sys.exit(1)
     usage = data.get("usage")
-    stats = _UsageStats(
-        model=model,
-        prompt_tokens=usage.get("prompt_tokens", 0),
-        completion_tokens=usage.get("completion_tokens", 0),
-        cost_usd=usage.get("cost"),
-    ) if usage else None
+    stats = (
+        _UsageStats(
+            model=model,
+            prompt_tokens=usage.get("prompt_tokens", 0),
+            completion_tokens=usage.get("completion_tokens", 0),
+            cost_usd=usage.get("cost"),
+        )
+        if usage
+        else None
+    )
     return text, stats

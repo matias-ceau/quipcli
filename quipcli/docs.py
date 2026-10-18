@@ -83,11 +83,14 @@ OPTIONS
     -e, --execute       Execute mode: generate a shell command, confirm, then run.
                         Prompts [Y/n/e] — Y is default (Enter to confirm).
                         Press e to open the command in $EDITOR with context.
+                        Mutually exclusive with -c/-a.
 
     -c, --code          Code mode: generate raw code to stdout (no prose).
+                        Mutually exclusive with -e/-a.
 
     -a, --agent         Agent mode: multi-turn tool-calling loop instead of a
-                        single reply — see AGENT MODE below.
+                        single reply — see AGENT MODE below. Mutually
+                        exclusive with -e/-c.
 
     --max-steps N       With -a: max tool-calling loop iterations (default: 12).
 

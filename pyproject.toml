@@ -7,7 +7,11 @@ requires-python = ">=3.14"
 dependencies = ["argcomplete"]
 
 [dependency-groups]
-dev = ["pytest"]
+dev = [
+    "pyright>=1.1.411",
+    "pytest",
+    "ruff>=0.16.4",
+]
 
 [project.scripts]
 qp = "quipcli:main"
@@ -15,3 +19,14 @@ qp = "quipcli:main"
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.ruff]
+target-version = "py314"
+exclude = ["docs"]  # don't reformat Python snippets quoted in audit/report markdown
+
+[tool.ruff.lint.per-file-ignores]
+"quipcli/__init__.py" = ["F401", "I001"]  # intentional facade re-exports, ordered by module dependency chain
+
+[tool.pyright]
+pythonVersion = "3.14"
+include = ["quipcli", "tests"]

@@ -22,7 +22,9 @@ def _is_image_url(token: str) -> bool:
 def _encode_file_content(path: Path) -> dict:
     if path.stat().st_size > _MAX_FILE_BYTES:
         mb = path.stat().st_size // 1024 // 1024
-        print(f"Warning: {path.name} is {mb}MB — may exceed API limits.", file=sys.stderr)
+        print(
+            f"Warning: {path.name} is {mb}MB — may exceed API limits.", file=sys.stderr
+        )
     ext = path.suffix.lower()
     mime = _MEDIA_EXTENSIONS.get(ext, "application/octet-stream")
     data = base64.b64encode(path.read_bytes()).decode()
@@ -31,7 +33,10 @@ def _encode_file_content(path: Path) -> dict:
     if ext in _PDF_EXTS:
         return {"type": "file", "file": {"filename": path.name, "data": data}}
     if ext in _AUDIO_EXTS:
-        return {"type": "input_audio", "input_audio": {"data": data, "format": ext.lstrip(".")}}
+        return {
+            "type": "input_audio",
+            "input_audio": {"data": data, "format": ext.lstrip(".")},
+        }
     if ext in _VIDEO_EXTS:
         return {"type": "video_url", "video_url": {"url": f"data:{mime};base64,{data}"}}
     return {"type": "file", "file": {"filename": path.name, "data": data}}
@@ -55,12 +60,16 @@ def _build_user_content(
     def _add_file(path: Path) -> None:
         ext = path.suffix.lower()
         media_parts.append(_encode_file_content(path))
-        if ext in _IMAGE_EXTS:   detected.add("image")
-        elif ext in _PDF_EXTS:   detected.add("file")
-        elif ext in _AUDIO_EXTS: detected.add("audio")
-        elif ext in _VIDEO_EXTS: detected.add("video")
+        if ext in _IMAGE_EXTS:
+            detected.add("image")
+        elif ext in _PDF_EXTS:
+            detected.add("file")
+        elif ext in _AUDIO_EXTS:
+            detected.add("audio")
+        elif ext in _VIDEO_EXTS:
+            detected.add("video")
 
-    for f in (extra_files or []):
+    for f in extra_files or []:
         p = Path(f)
         if p.exists():
             _add_file(p)

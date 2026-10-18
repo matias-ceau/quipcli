@@ -24,7 +24,4 @@ def _machine_context() -> str:
     since the same config travels across different machines."""
     os_desc = _linux_distro() or f"{platform.system()} {platform.release()}"
     shell = os.path.basename(os.environ.get("SHELL", "")) or "unknown"
-    return (
-        f"Machine context: OS={os_desc}; shell={shell}; "
-        f"arch={platform.machine()}."
-    )
+    return f"Machine context: OS={os_desc}; shell={shell}; arch={platform.machine()}."

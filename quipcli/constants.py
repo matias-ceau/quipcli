@@ -46,17 +46,21 @@ _API_KEY = os.environ.get("LLM_CMD_API_KEY") or os.environ.get("OPENROUTER_API_K
 _OLLAMA_URL = os.environ.get("LLM_CMD_OLLAMA_URL", "http://localhost:11434")
 
 # XDG paths
-_CACHE_DIR  = Path(os.environ.get("XDG_CACHE_HOME",  Path.home() / ".cache"))  / "quipcli"
-_CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "quipcli"
-_DATA_DIR   = Path(os.environ.get("XDG_DATA_HOME",   Path.home() / ".local" / "share")) / "quipcli"
+_CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "quipcli"
+_CONFIG_DIR = (
+    Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "quipcli"
+)
+_DATA_DIR = (
+    Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share")) / "quipcli"
+)
 
-_MODELS_CACHE   = _CACHE_DIR  / "models.json"
-_RANKINGS_CACHE = _CACHE_DIR  / "rankings.json"
-_CONFIG_FILE    = _CONFIG_DIR / "config.json"
-_HISTORY_DB     = _DATA_DIR   / "history.db"
+_MODELS_CACHE = _CACHE_DIR / "models.json"
+_RANKINGS_CACHE = _CACHE_DIR / "rankings.json"
+_CONFIG_FILE = _CONFIG_DIR / "config.json"
+_HISTORY_DB = _DATA_DIR / "history.db"
 
 _CACHE_TTL = 43200
-_SSL_CTX   = ssl.create_default_context()
+_SSL_CTX = ssl.create_default_context()
 
 
 def _migrate_legacy_data() -> None:
@@ -64,14 +68,21 @@ def _migrate_legacy_data() -> None:
     present and the quipcli location hasn't been used yet. Never touches or
     deletes the old files — plain copy, safe to run on every startup (it's a
     no-op once the new location exists)."""
-    old_cache  = Path(os.environ.get("XDG_CACHE_HOME",  Path.home() / ".cache"))  / "llm-cmd"
-    old_config = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "llm-cmd"
-    old_data   = Path(os.environ.get("XDG_DATA_HOME",   Path.home() / ".local" / "share")) / "llm-cmd"
+    old_cache = (
+        Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "llm-cmd"
+    )
+    old_config = (
+        Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "llm-cmd"
+    )
+    old_data = (
+        Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share"))
+        / "llm-cmd"
+    )
     try:
         for old_file, new_file in (
             (old_config / "config.json", _CONFIG_FILE),
-            (old_cache  / "models.json", _MODELS_CACHE),
-            (old_data   / "history.db",  _HISTORY_DB),
+            (old_cache / "models.json", _MODELS_CACHE),
+            (old_data / "history.db", _HISTORY_DB),
         ):
             if old_file.exists() and not new_file.exists():
                 new_file.parent.mkdir(parents=True, exist_ok=True)
@@ -89,16 +100,23 @@ def _atomic_write_text(path: Path, text: str) -> None:
     tmp.write_text(text)
     os.replace(tmp, path)
 
+
 # Multimodal file extension → MIME type
 _MEDIA_EXTENSIONS: dict[str, str] = {
-    ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
-    ".gif": "image/gif",  ".webp": "image/webp",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
     ".pdf": "application/pdf",
-    ".mp3": "audio/mpeg", ".wav": "audio/wav", ".ogg": "audio/ogg",
-    ".mp4": "video/mp4",  ".webm": "video/webm",
+    ".mp3": "audio/mpeg",
+    ".wav": "audio/wav",
+    ".ogg": "audio/ogg",
+    ".mp4": "video/mp4",
+    ".webm": "video/webm",
 }
 _IMAGE_EXTS = frozenset({".jpg", ".jpeg", ".png", ".gif", ".webp"})
-_PDF_EXTS   = frozenset({".pdf"})
+_PDF_EXTS = frozenset({".pdf"})
 _AUDIO_EXTS = frozenset({".mp3", ".wav", ".ogg"})
 _VIDEO_EXTS = frozenset({".mp4", ".webm"})
 _MAX_FILE_BYTES = 20 * 1024 * 1024  # 20 MB warning threshold

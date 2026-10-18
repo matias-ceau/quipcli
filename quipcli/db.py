@@ -44,7 +44,9 @@ def _db_conn() -> sqlite3.Connection:
             mode              TEXT
         )
     """)
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id)")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id)"
+    )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_ts ON messages(ts)")
     conn.commit()
     return conn
@@ -56,10 +58,16 @@ def _record_usage(stats: _UsageStats, mode: str) -> None:
             conn.execute(
                 "INSERT INTO history(ts,model,prompt_tokens,completion_tokens,cost_usd,mode)"
                 " VALUES(?,?,?,?,?,?)",
-                (time.time(), stats.model, stats.prompt_tokens,
-                 stats.completion_tokens, stats.cost_usd, mode),
+                (
+                    time.time(),
+                    stats.model,
+                    stats.prompt_tokens,
+                    stats.completion_tokens,
+                    stats.cost_usd,
+                    mode,
+                ),
             )
-    except Exception:
+    except sqlite3.Error, OSError:
         pass
 
 
@@ -79,14 +87,18 @@ def _record_message(
                 "(session_id,ts,role,content,model,prompt_tokens,completion_tokens,cost_usd,mode)"
                 " VALUES(?,?,?,?,?,?,?,?,?)",
                 (
-                    session_id, time.time(), role, content_str, model,
+                    session_id,
+                    time.time(),
+                    role,
+                    content_str,
+                    model,
                     stats.prompt_tokens if stats else 0,
                     stats.completion_tokens if stats else 0,
                     stats.cost_usd if stats else None,
                     mode,
                 ),
             )
-    except Exception:
+    except sqlite3.Error, OSError:
         pass
 
 
@@ -97,7 +109,7 @@ def _get_session_messages(session_id: str) -> list[dict]:
                 "SELECT role, content FROM messages WHERE session_id=? ORDER BY ts",
                 (session_id,),
             ).fetchall()
-    except Exception:
+    except sqlite3.Error, OSError:
         return []
     result = []
     for role, content in rows:
@@ -106,7 +118,7 @@ def _get_session_messages(session_id: str) -> list[dict]:
             if isinstance(parsed, list):
                 result.append({"role": role, "content": parsed})
                 continue
-        except (json.JSONDecodeError, ValueError):
+        except json.JSONDecodeError, ValueError:
             pass
         result.append({"role": role, "content": content})
     return result
@@ -121,7 +133,7 @@ def _last_session_id() -> str | None:
                 "SELECT session_id FROM messages ORDER BY ts DESC LIMIT 1"
             ).fetchone()
         return row[0] if row else None
-    except Exception:
+    except sqlite3.Error, OSError:
         return None
 
 
@@ -131,7 +143,9 @@ def _resolve_session(
     quiet: bool = False,
 ) -> tuple[str | None, list[dict]]:
     if session_arg and follow_up:
-        print("Error: --session and --follow-up are mutually exclusive.", file=sys.stderr)
+        print(
+            "Error: --session and --follow-up are mutually exclusive.", file=sys.stderr
+        )
         sys.exit(1)
 
     def _announce(sid: str, n_msgs: int = 0) -> None:
@@ -174,11 +188,11 @@ def _cost_summary(days: int) -> dict:
                 " FROM history WHERE ts > ?",
                 (since,),
             ).fetchone()
-    except Exception:
+    except sqlite3.Error, OSError:
         return {}
     return {
-        "requests":          row[0] or 0,
-        "cost_usd":          row[1] or 0.0,
-        "prompt_tokens":     row[2] or 0,
+        "requests": row[0] or 0,
+        "cost_usd": row[1] or 0.0,
+        "prompt_tokens": row[2] or 0,
         "completion_tokens": row[3] or 0,
     }
