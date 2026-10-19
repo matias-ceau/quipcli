@@ -1,5 +1,7 @@
 import os
+import shutil
 import sys
+import time
 
 from . import constants
 from .agent import run_agent_loop
@@ -13,7 +15,15 @@ from .config import (
     _seed_defaults,
 )
 from .context import _machine_context
-from .db import _record_message, _record_usage, _resolve_session
+from .db import (
+    _current_session_id,
+    _list_sessions,
+    _record_message,
+    _record_usage,
+    _resolve_session,
+    _save_session,
+    _session_info,
+)
 from .execute import confirm_and_run
 from .http_client import call_llm_streaming
 from .models import (
@@ -144,10 +154,47 @@ def _do_status() -> None:
     )
     print(f"reasoning     : {cfg.get('reasoning_effort') or '(model default)'}")
     print(f"system_prompt : {cfg.get('system_prompt') or '(none)'}")
+    sid = _current_session_id()
+    info = _session_info(sid) if sid else None
+    session_display = f"{info[0]} ({sid}) · {info[1]} messages" if info else "(none)"
+    print(f"session       : {session_display}  (continue with -f)")
     print(f"machine ctx   : {_machine_context()}")
     print(
         f"history db    : {constants._HISTORY_DB}  ({'exists' if constants._HISTORY_DB.exists() else 'not created'})"
     )
+
+
+def _age(ts: float) -> str:
+    secs = max(0, int(time.time() - ts))
+    for unit, size in (("d", 86400), ("h", 3600), ("m", 60)):
+        if secs >= size:
+            return f"{secs // size}{unit}"
+    return f"{secs}s"
+
+
+def _do_sessions() -> None:
+    sessions = _list_sessions()
+    if not sessions:
+        print("No sessions yet.")
+        return
+    current = _current_session_id()
+    name_w = min(28, max(len(s["name"]) for s in sessions))
+    width = shutil.get_terminal_size((100, 20)).columns
+    prompt_w = max(10, width - name_w - 26)
+    color = _color_enabled()
+    print(f"  {'id':6}  {'name':{name_w}}  {'age':>4}  {'msgs':>4}  first prompt")
+    for s in sessions:
+        prompt = " ".join(s["first_prompt"].split())
+        if len(prompt) > prompt_w:
+            prompt = prompt[: prompt_w - 1] + "…"
+        mark = "●" if s["id"] == current else " "
+        line = (
+            f"{mark} {s['id']:6}  {s['name'][:name_w]:{name_w}}  "
+            f"{_age(s['updated']):>4}  {s['messages']:>4}  {prompt}"
+        )
+        if color and s["id"] == current:
+            line = f"\033[32m{line}\033[0m"
+        print(line)
 
 
 def _do_cost(period: str) -> None:
@@ -306,6 +353,10 @@ def _main() -> None:
         _do_status()
         return
 
+    if args.sessions:
+        _do_sessions()
+        return
+
     if args.cost is not None:
         _do_cost(args.cost)
         return
@@ -321,9 +372,14 @@ def _main() -> None:
         print(f"\033[2mModel: {resolved_model}\033[0m", file=sys.stderr)
     args.model = resolved_model
 
-    session_id, ctx_messages = _resolve_session(
-        args.session, args.follow_up, args.quiet
+    history_limit = _load_config().get("session_history", constants.SESSION_HISTORY)
+    session = _resolve_session(
+        args.session,
+        args.follow_up,
+        args.quiet,
+        history_limit=history_limit if isinstance(history_limit, int) else None,
     )
+    ctx_messages = session.messages
     user_content, detected_mods = get_content(args)
 
     # Prompt text for display / execute mode system prompt
@@ -367,13 +423,18 @@ def _main() -> None:
     def _post(response_text: str, stats, mode: str) -> None:
         if stats:
             _record_usage(stats, mode)
+        _save_session(session, prompt_text)
         if show_stats:
-            _print_stats(stats)
-        if session_id:
-            _record_message(session_id, "user", user_content, None, None, mode)
-            _record_message(
-                session_id, "assistant", response_text, args.model, stats, mode
-            )
+            _print_stats(stats, session.name)
+        _record_message(session.id, "user", user_content, None, None, mode)
+        _record_message(
+            session.id,
+            "assistant",
+            response_text,
+            stats.model if stats else args.model,
+            stats,
+            mode,
+        )
 
     if args.execute:
         msgs = _build_messages(args.system or _default_system("execute"))

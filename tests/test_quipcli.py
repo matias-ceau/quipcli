@@ -243,8 +243,12 @@ class TestParser:
         assert build_parser().parse_args(["-a", "--no-web", "do it"]).no_web is True
 
     def test_system_flag(self):
-        args = build_parser().parse_args(["-S", "be terse", "hi"])
+        args = build_parser().parse_args(["-P", "be terse", "hi"])
         assert args.system == "be terse"
+
+    def test_sessions_flag(self):
+        args = build_parser().parse_args(["-S"])
+        assert args.sessions is True
 
     def test_update_models_flag(self):
         assert build_parser().parse_args(["--update-models"]).update_models is True
@@ -2248,19 +2252,130 @@ class TestSessions:
         assert msgs[0] == {"role": "user", "content": "hello"}
         assert msgs[1] == {"role": "assistant", "content": "world"}
 
-    def test_last_session_id(self, tmp_path):
+    @pytest.fixture
+    def db(self, tmp_path):
         with (
             patch("quipcli.constants._HISTORY_DB", tmp_path / "history.db"),
             patch("quipcli.constants._DATA_DIR", tmp_path),
         ):
-            quipcli._record_message("first", "user", "a", None, None, "chat")
-            quipcli._record_message("second", "user", "b", None, None, "chat")
-            last = quipcli._last_session_id()
-        assert last == "second"
+            yield tmp_path
 
-    def test_last_session_none_when_empty(self, tmp_path):
+    def _send(self, session, prompt, answer="ok"):
+        quipcli._save_session(session, prompt)
+        quipcli._record_message(session.id, "user", prompt, None, None, "chat")
+        quipcli._record_message(session.id, "assistant", answer, "m", None, "chat")
+
+    def test_plain_call_starts_new_unnamed_session(self, db, capsys):
+        session = quipcli._resolve_session(None, False)
+        assert session.is_new and session.name is None and session.messages == []
+        assert re.fullmatch(r"[0-9a-f]{6}", session.id)
+        assert capsys.readouterr().err == ""
+
+    def test_save_names_session_from_prompt(self, db):
+        session = quipcli._resolve_session(None, False)
+        self._send(session, "how do I update the debtap database?")
+        assert session.name == "update-debtap-database"
+        assert quipcli._current_session_id() == session.id
+
+    def test_name_from_prompt(self):
+        assert quipcli._name_from_prompt("What is the meaning of anagnorisis") == (
+            "meaning-anagnorisis"
+        )
+        assert quipcli._name_from_prompt("??") == "session"
+
+    def test_generated_names_are_unique(self, db):
+        a = quipcli._resolve_session(None, False)
+        self._send(a, "fix wifi")
+        b = quipcli._resolve_session(None, False)
+        self._send(b, "fix wifi")
+        assert (a.name, b.name) == ("fix-wifi", "fix-wifi-2")
+
+    def test_follow_up_continues_current_session(self, db, capsys):
+        a = quipcli._resolve_session(None, False)
+        self._send(a, "first topic")
+        session = quipcli._resolve_session(None, follow_up=True)
+        assert session.id == a.id and not session.is_new
+        assert [m["content"] for m in session.messages] == ["first topic", "ok"]
+        assert "first-topic" in capsys.readouterr().err
+
+    def test_follow_up_targets_session_picked_as_current(self, db):
+        a = quipcli._resolve_session(None, False)
+        self._send(a, "alpha")
+        b = quipcli._resolve_session(None, False)
+        self._send(b, "beta")
+        quipcli._set_current_session(a.id)
+        assert quipcli._resolve_session(None, follow_up=True).id == a.id
+
+    def test_session_by_name_and_id_prefix(self, db):
+        a = quipcli._resolve_session(None, False)
+        self._send(a, "alpha topic")
+        assert quipcli._resolve_session("alpha-topic", False).id == a.id
+        assert quipcli._resolve_session(a.id[:4], False).id == a.id
+
+    def test_unknown_session_name_creates_it(self, db, capsys):
+        session = quipcli._resolve_session("myproject", False)
+        assert session.is_new and session.name == "myproject"
+        assert "new" in capsys.readouterr().err
+        self._send(session, "anything")
+        assert session.name == "myproject"
+        assert quipcli._resolve_session("myproject", False).id == session.id
+
+    def test_ambiguous_id_prefix_exits(self, db):
+        for sid in ("abc111", "abc222"):
+            self._send(quipcli._Session(sid, None, [], is_new=True), f"p {sid}")
+        with pytest.raises(SystemExit):
+            quipcli._resolve_session("abc", False)
+
+    def test_history_limit_starts_on_user_turn(self, db):
+        a = quipcli._resolve_session(None, False)
+        for i in range(4):
+            self._send(a, f"q{i}", f"a{i}")
+        msgs = quipcli._get_session_messages(a.id, limit=3)
+        assert [m["content"] for m in msgs] == ["q3", "a3"]
+        assert len(quipcli._get_session_messages(a.id, limit=0)) == 8
+
+    def test_list_sessions_most_recent_first(self, db):
+        a = quipcli._resolve_session(None, False)
+        self._send(a, "older one")
+        b = quipcli._resolve_session(None, False)
+        self._send(b, "newer one")
+        rows = quipcli._list_sessions()
+        assert [r["name"] for r in rows] == ["newer-one", "older-one"]
+        assert rows[0]["messages"] == 2
+        assert rows[0]["first_prompt"] == "newer one"
+
+    def test_legacy_named_sessions_migrated(self, db):
+        conn = sqlite3.connect(db / "history.db")
+        conn.execute(
+            "CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            " session_id TEXT NOT NULL, ts REAL NOT NULL, role TEXT NOT NULL,"
+            " content TEXT NOT NULL, model TEXT, prompt_tokens INTEGER NOT NULL"
+            " DEFAULT 0, completion_tokens INTEGER NOT NULL DEFAULT 0,"
+            " cost_usd REAL, mode TEXT)"
+        )
+        conn.execute(
+            "INSERT INTO messages(session_id,ts,role,content) VALUES('oldconv',1,'user','hi')"
+        )
+        conn.commit()
+        conn.close()
+        quipcli.db._SCHEMA_READY.clear()
+        session = quipcli._resolve_session("oldconv", False)
+        assert not session.is_new
+        assert re.fullmatch(r"[0-9a-f]{6}", session.id)
+        assert session.messages == [{"role": "user", "content": "hi"}]
+
+    def test_current_none_when_empty(self, tmp_path):
         with patch("quipcli.constants._HISTORY_DB", tmp_path / "missing.db"):
-            assert quipcli._last_session_id() is None
+            assert quipcli._current_session_id() is None
+
+    def test_current_degrades_on_db_error(self, tmp_path):
+        db = tmp_path / "history.db"
+        db.write_text("")
+        with (
+            patch("quipcli.constants._HISTORY_DB", db),
+            patch("sqlite3.connect", side_effect=sqlite3.OperationalError("db error")),
+        ):
+            assert quipcli._current_session_id() is None
 
     def test_record_message_never_crashes_on_db_error(self, tmp_path):
         with (
@@ -2281,63 +2396,7 @@ class TestSessions:
         ):
             assert quipcli._get_session_messages("sess1") == []
 
-    def test_last_session_id_degrades_on_db_error(self, tmp_path):
-        db = tmp_path / "history.db"
-        db.write_text("")
-        with (
-            patch("quipcli.constants._HISTORY_DB", db),
-            patch("sqlite3.connect", side_effect=sqlite3.OperationalError("db error")),
-        ):
-            assert quipcli._last_session_id() is None
-
-    def test_resolve_session_none(self):
-        sid, msgs = quipcli._resolve_session(None, False)
-        assert sid is None
-        assert msgs == []
-
-    def test_resolve_session_named_new(self, tmp_path):
-        with (
-            patch("quipcli.constants._HISTORY_DB", tmp_path / "history.db"),
-            patch("quipcli.constants._DATA_DIR", tmp_path),
-        ):
-            sid, msgs = quipcli._resolve_session("myconv", False)
-        assert sid == "myconv"
-        assert msgs == []
-
-    def test_resolve_session_named_existing(self, tmp_path):
-        with (
-            patch("quipcli.constants._HISTORY_DB", tmp_path / "history.db"),
-            patch("quipcli.constants._DATA_DIR", tmp_path),
-        ):
-            quipcli._record_message("myconv", "user", "hi", None, None, "chat")
-            quipcli._record_message("myconv", "assistant", "hey", "gpt", None, "chat")
-            sid, msgs = quipcli._resolve_session("myconv", False)
-        assert sid == "myconv"
-        assert len(msgs) == 2
-
-    def test_resolve_session_auto_generates_name(self, tmp_path, capsys):
-        with (
-            patch("quipcli.constants._HISTORY_DB", tmp_path / "history.db"),
-            patch("quipcli.constants._DATA_DIR", tmp_path),
-        ):
-            sid, msgs = quipcli._resolve_session("auto", False)
-        assert sid is not None
-        assert sid.startswith("auto-")
-        assert msgs == []
-        assert "Session:" in capsys.readouterr().err
-
-    def test_resolve_follow_up(self, tmp_path, capsys):
-        with (
-            patch("quipcli.constants._HISTORY_DB", tmp_path / "history.db"),
-            patch("quipcli.constants._DATA_DIR", tmp_path),
-        ):
-            quipcli._record_message("prev", "user", "q", None, None, "chat")
-            quipcli._record_message("prev", "assistant", "a", "gpt", None, "chat")
-            sid, msgs = quipcli._resolve_session(None, follow_up=True)
-        assert sid == "prev"
-        assert len(msgs) == 2
-
-    def test_resolve_follow_up_no_history_exits(self, tmp_path):
+    def test_follow_up_no_history_exits(self, tmp_path):
         with (
             patch("quipcli.constants._HISTORY_DB", tmp_path / "missing.db"),
             pytest.raises(SystemExit),
@@ -2348,22 +2407,8 @@ class TestSessions:
         with pytest.raises(SystemExit):
             quipcli._resolve_session("myconv", follow_up=True)
 
-    def test_named_existing_session_announced_with_count(self, tmp_path, capsys):
-        with (
-            patch("quipcli.constants._HISTORY_DB", tmp_path / "history.db"),
-            patch("quipcli.constants._DATA_DIR", tmp_path),
-        ):
-            quipcli._record_message("myconv", "user", "hi", None, None, "chat")
-            quipcli._record_message("myconv", "assistant", "hey", "gpt", None, "chat")
-            quipcli._resolve_session("myconv", False)
-        assert "Session: myconv (2 messages)" in capsys.readouterr().err
-
-    def test_quiet_suppresses_session_announcement(self, tmp_path, capsys):
-        with (
-            patch("quipcli.constants._HISTORY_DB", tmp_path / "history.db"),
-            patch("quipcli.constants._DATA_DIR", tmp_path),
-        ):
-            quipcli._resolve_session("auto", False, quiet=True)
+    def test_quiet_suppresses_session_announcement(self, db, capsys):
+        quipcli._resolve_session("named", False, quiet=True)
         assert capsys.readouterr().err == ""
 
     def test_multimodal_content_round_trip(self, tmp_path):
@@ -2941,7 +2986,42 @@ class TestMainDispatch:
         assert "hi there" in capsys.readouterr().out
         record_usage.assert_called_once()
         assert record_usage.call_args[0][1] == "chat"
-        record_message.assert_not_called()  # no -s/-f, so no session_id
+        # Every prompt belongs to a session — a fresh one without -s/-f.
+        assert record_message.call_count == 2
+        assert record_message.call_args_list[0].args[1:3] == ("user", "hello")
+
+    def _run_chat(self, monkeypatch, argv, answer):
+        monkeypatch.setattr(sys, "argv", ["qp", *argv])
+        with (
+            patch("subprocess.Popen"),
+            patch("http.client.HTTPSConnection") as cls,
+            patch("quipcli.constants._API_KEY", "key"),
+        ):
+            cls.return_value = _mock_conn(self._sse(answer))
+            quipcli.main()
+        _, _, body, _ = cls.return_value.request.call_args[0]
+        return json.loads(body)["messages"]
+
+    def test_follow_up_resends_session_and_new_prompt_starts_fresh(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        self._isolate(tmp_path, monkeypatch)
+        self._run_chat(monkeypatch, ["first", "question"], "one")
+        msgs = self._run_chat(monkeypatch, ["-f", "second"], "two")
+        assert [m["content"] for m in msgs[1:]] == ["first question", "one", "second"]
+        msgs = self._run_chat(monkeypatch, ["unrelated"], "three")
+        assert [m["content"] for m in msgs[1:]] == ["unrelated"]
+        capsys.readouterr()
+
+        monkeypatch.setattr(sys, "argv", ["qp", "-S"])
+        quipcli.main()
+        out = capsys.readouterr().out
+        assert "first-question" in out and "unrelated" in out
+        assert out.index("unrelated") < out.index("first-question")
+
+        monkeypatch.setattr(sys, "argv", ["qp", "--status"])
+        quipcli.main()
+        assert "session       : unrelated (" in capsys.readouterr().out
 
     def test_execute_mode_streams_silently_and_confirms(
         self, tmp_path, monkeypatch, capsys
