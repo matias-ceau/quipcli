@@ -7,6 +7,7 @@ qp what is the meaning of anagnorisis
 qp -e update all my cargo binaries
 qp -c write a python function that flattens a nested list
 qp -a summarize what changed in this repo today and note it in CHANGES.md
+qp                      # interactive chat session (same as qp -t)
 ```
 
 Everything lives behind a single binary, `qp` — no separate subcommand executables.
@@ -58,9 +59,9 @@ qp [-e|-c|-a] [-m MODEL] [-r EFFORT] [-P SYSTEM] [-s SESSION|-f] [-i FILE] [-q] 
 | `--config-edit` | Open `config.json` in `$EDITOR` |
 | `--status` | Show current configuration |
 | `--cost [PERIOD]` | Usage cost summary (`1d`/`7d`/`30d`/`all`) |
-| `--tui` | Interactive fzf-based picker for models and config — see below |
+| `-t` | Interactive: alone (or with `-f`/`-s`/`-e`/`-c`/`-a`) a chat session, words name it; with `-S` the session picker; with `--config-edit` the config picker — see below. A bare `qp` on a terminal = `qp -t` |
 | `--update-models` | Force-refresh model cache |
-| `--update-rankings` | Cache OpenRouter's top-50 daily usage ranking (needs an OpenRouter key; usage volume, not a quality score — shown in `--tui`'s model preview once cached) |
+| `--update-rankings` | Cache OpenRouter's top-50 daily usage ranking (needs an OpenRouter key; usage volume, not a quality score — shown in the model picker's preview once cached) |
 | `--version` | Print version |
 
 Chat responses render lightweight ANSI markdown styling on TTYs (headings, code spans/blocks, bold, list items, blockquotes) while still streaming token-by-token. Disable colors with `NO_COLOR=1`. A provider error that arrives mid-stream is printed as `Error: …`, and an empty reply prints a warning with its `finish_reason` rather than exiting silently.
@@ -98,7 +99,7 @@ Runs a multi-turn tool-calling loop instead of a single one-shot reply, so it ca
 
 `run_shell` and `write_file` always prompt `[Y/n]` before doing anything — same confirm-first posture as `-e`. Declining just tells the model to try another approach; it doesn't abort the run. `read_file` runs without confirmation. A dim `thinking…` line (and the model's reasoning, if any) shows on stderr between steps. If `--max-steps` (default 12) runs out, `qp` makes one last call with tools disabled so the model summarizes what it found. The hosted web tools are only sent to OpenRouter — other providers (and the Ollama fallback) would reject them.
 
-The prompt for this mode lives in `agent_system_prompt` in `config.json`, seeded like the other per-mode prompts — edit it with `qp --config-edit` or `qp --tui`.
+The prompt for this mode lives in `agent_system_prompt` in `config.json`, seeded like the other per-mode prompts — edit it with `qp --config-edit` (add `-t` for the picker).
 
 ## Model routing (no code needed)
 
@@ -116,18 +117,38 @@ See OpenRouter's [Auto Router](https://openrouter.ai/docs/guides/routing/routers
 
 If the provider is unreachable (after automatic retries) or no API key is set, `qp` transparently falls back to a local [Ollama](https://ollama.com) instance when one is running. The local model comes from the `"ollama_model"` config key, or the first available model otherwise. Override the Ollama URL with `LLM_CMD_OLLAMA_URL` (default `http://localhost:11434`). Retries honour the provider's `Retry-After` header (capped at 30 s).
 
-## Interactive TUI (`--tui`)
+## Interactive mode (`-t`)
 
 ```bash
-qp --tui
+qp                     # new interactive session (or: qp -t)
+qp -t myproject        # resume "myproject", or start a session with that name
+qp -f -t               # continue the current session interactively
+qp -e -t               # interactive execute mode: each reply is a command to confirm/run
+qp -S -t               # search sessions with fzf
 ```
+
+A prompt loop built on [prompt_toolkit](https://python-prompt-toolkit.readthedocs.io): `Enter` sends, `Alt-Enter` inserts a newline, `Ctrl-C` clears the line or interrupts a reply, `Ctrl-D` quits; input history persists and the bottom bar shows model · reasoning · mode · session. Every exchange is recorded like a one-shot `qp`, so `qp -f` continues it later. Resuming prints the last messages.
+
+| Command | |
+|---|---|
+| `/model [name]` | switch model (fzf picker without a name) |
+| `/reasoning [effort\|default]` | reasoning effort for the rest of the session |
+| `/mode [chat\|code\|exec\|agent]` | switch mode |
+| `/attach PATH…` | attach files to the next message |
+| `/new [name]` · `/sessions` · `/session` | new / switch (fzf) / show session |
+| `/config` · `/help` · `/exit` | config picker, help, quit |
+
+Commands and their arguments (models, efforts, paths) are Tab-completed.
+
+### fzf pickers
 
 Shells out to the real `fzf` (and `bat`, for preview syntax highlighting) — no reimplemented fuzzy-finder, and it inherits your existing `FZF_DEFAULT_OPTS` if you have one.
 
-- **Models** — fuzzy list of cached models, current default marked `*`. The preview pane shows name, context length, price per 1M tokens (prompt/completion), input/output modalities, usage rank (once `qp --update-rankings` has been run), and the model's description from the provider. `Enter` sets the highlighted model as the new default; `ctrl-r` refreshes the cache from the provider without leaving the picker.
-- **Config** — fuzzy list of editable keys (`default_model`, `reasoning_effort`, `chat_system_prompt`, `execute_system_prompt`, `code_system_prompt`, `agent_system_prompt`, `system_prompt`, `ollama_model`), with the live `config.json` shown via `bat` on the right. `Enter` on `default_model` drills into the Models list; on `reasoning_effort`, into a list of effort levels (or `(model default)` to remove the key); on `ollama_model`, into a list of locally available Ollama models (falls back to free-text entry if Ollama is unreachable); on any `*_system_prompt` key, opens `$EDITOR` on just that value. `ctrl-e` opens the whole config file in `$EDITOR` at any time.
+- **Sessions** (`qp -S -t`, `/sessions`) — the query searches session names *and message contents* (every term must match, case-insensitive), re-queried from SQLite as you type; the preview shows each hit highlighted in context, then the end of the conversation. `Enter` makes the session current (continue with `qp -f`), `Alt-Enter` opens it interactively.
+- **Models** (`qp --model-set`, `/model`) — fuzzy list of cached models, current default marked `*`. The preview pane shows name, context length, price per 1M tokens (prompt/completion), input/output modalities, usage rank (once `qp --update-rankings` has been run), and the model's description from the provider. `Enter` sets the highlighted model as the new default; `ctrl-r` refreshes the cache from the provider without leaving the picker.
+- **Config** (`qp --config-edit -t`, `/config`) — fuzzy list of editable keys (`default_model`, `reasoning_effort`, `chat_system_prompt`, `execute_system_prompt`, `code_system_prompt`, `agent_system_prompt`, `system_prompt`, `ollama_model`), with the live `config.json` shown via `bat` on the right. `Enter` on `default_model` drills into the Models list; on `reasoning_effort`, into a list of effort levels (or `(model default)` to remove the key); on `ollama_model`, into a list of locally available Ollama models (falls back to free-text entry if Ollama is unreachable); on any `*_system_prompt` key, opens `$EDITOR` on just that value. `ctrl-e` opens the whole config file in `$EDITOR` at any time.
 
-`Esc` steps back one level; `Esc` at the top menu exits. Requires `fzf` to be installed — `qp --model-set` (no value) also uses this picker when `fzf` is available, falling back to a plain numbered prompt otherwise.
+`Esc` steps back one level. Requires `fzf` — `qp --model-set` (no value) falls back to a plain numbered prompt without it.
 
 ## Configuration
 
@@ -137,7 +158,7 @@ Shells out to the real `fzf` (and `bat`, for preview syntax highlighting) — no
 qp --model-set            # pick a default model interactively (fzf, or a numbered list)
 qp --model-set haiku      # set by substring match
 qp --config-edit          # open config.json in $EDITOR
-qp --tui                  # or browse/edit everything interactively
+qp --config-edit -t       # or browse/edit everything with fzf
 ```
 
 Most of these have no config.json equivalent at all (API key, API URL, Ollama URL are env-only). The one exception is the model: where both `LLM_CMD_MODEL` and `config.json`'s `default_model` are set, the environment variable wins.

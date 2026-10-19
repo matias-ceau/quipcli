@@ -36,7 +36,12 @@ qp — quick reference
                                         (chat/execute/code/agent_system_prompt are
                                         seeded with editable defaults; add
                                         "system_prompt" for standing instructions)
-  qp --tui                             interactive fzf picker for models + config
+  qp   (or qp -t)                      interactive chat session (prompt_toolkit)
+  qp -t myproject                      interactive session "myproject" (resume/create)
+  qp -f -t / qp -e -t / qp -a -t       continue / execute / agent, interactively
+  qp -S -t                             search sessions (fzf): enter = make current,
+                                        alt-enter = open interactively
+  qp --config-edit -t                  fzf config picker (qp --model-set: model picker)
   qp --status                          show current configuration + machine context
   qp --cost [1d|7d|30d|all]            show cost summary (default 7d)
 
@@ -44,7 +49,7 @@ qp — quick reference
   qp --update-rankings                 cache OpenRouter's top-50 usage ranking
                                         (needs an OpenRouter API key; usage
                                         volume, not a quality score — shown in
-                                        --tui's model preview when cached)
+                                        the model picker's preview when cached)
   qp --version                         show version
   qp --tldr                            this cheatsheet
   qp --docs                            full documentation
@@ -57,13 +62,14 @@ _DOCS = """\
 qp(1)                               User Commands                               qp(1)
 
 NAME
-    qp — minimal CLI for LLMs, with an optional fzf-based --tui
+    qp — minimal CLI for LLMs, with an interactive mode (-t) and fzf pickers
 
 SYNOPSIS
     qp [-e|-c|-a] [-m MODEL] [-r EFFORT] [-P SYSTEM] [-s SESSION|-f] [-i FILE] [-q] [words ...]
-    qp -S
+    qp [-t] [-e|-c|-a] [-f | -s SESSION | NAME]
+    qp -S [-t]
     qp --update-models | --update-rankings | --models [--in MOD] [--out MOD] | --model-get | --model-set [MODEL]
-    qp --config-edit | --status | --cost [PERIOD] | --tui
+    qp --config-edit [-t] | --status | --cost [PERIOD]
     qp --tldr | --docs | --version
 
 DESCRIPTION
@@ -159,7 +165,7 @@ OPTIONS
                         does) and only works against OpenRouter itself, not
                         other OpenAI-compatible providers. This is a usage-volume
                         signal, not a quality/intelligence score — OpenRouter
-                        doesn't publish one. When cached, --tui's model preview
+                        doesn't publish one. When cached, the model picker's preview
                         shows the model's rank and daily token count.
 
     --models            List cached models (* marks the current default), then exit.
@@ -172,7 +178,7 @@ OPTIONS
     --model-set [MODEL] Set the default model (written to config file), then exit.
                         MODEL may be a substring that uniquely matches a cached
                         model id. If omitted: launches the fzf model picker
-                        (see --tui) when fzf is installed, otherwise falls back
+                        (see PICKERS) when fzf is installed, otherwise falls back
                         to a numbered list read from stdin.
 
     --config-edit       Open the config file directly in $EDITOR, then exit.
@@ -183,9 +189,11 @@ OPTIONS
     --cost [PERIOD]     Show usage cost summary, then exit.
                         PERIOD: 1d, 7d (default), 30d, or all.
 
-    --tui               Interactive fzf-based picker for models and config
-                        (see TUI below). Requires fzf; bat is used for preview
-                        syntax highlighting when available.
+    -t, --tui           Interactive — see INTERACTIVE SESSION and PICKERS.
+                        Alone, or with -f/-s/-e/-c/-a: a chat session (words
+                        name it, like -s). With -S: the fzf session picker.
+                        With --config-edit: the fzf config picker. A bare
+                        `qp` (no words, stdin a terminal) is the same as -t.
 
     --version           Print version and exit.
 
@@ -231,7 +239,7 @@ AGENT MODE (-a)
 
     The system prompt for this mode is agent_system_prompt in config.json,
     seeded like chat/execute/code_system_prompt — edit with --config-edit
-    or --tui.
+    (-t for the picker).
 
 MODEL ROUTING
     -m/--model passes its argument straight through to the API, so
@@ -272,14 +280,41 @@ SESSIONS
     to stay within the model's context window. --status shows the current
     session.
 
-TUI (--tui)
-    Interactive picker built on the real fzf/bat binaries (not a
-    reimplementation) — same conventions as fzf's own FZF_DEFAULT_OPTS if
-    you already have one configured.
+INTERACTIVE SESSION (-t)
+    A prompt loop (prompt_toolkit) over the same session machinery: every
+    reply is recorded and the session becomes current, so `qp -f` picks it
+    up later. Enter sends, Alt-Enter inserts a newline, Ctrl-C clears the
+    line (or interrupts a reply), Ctrl-D quits. Input history is kept in
+    ~/.local/share/quipcli/prompt_history; the bottom bar shows model,
+    reasoning effort, mode and session. Resuming shows the last messages.
+    Commands (Tab-completed, including their arguments):
 
-    Top menu: Models / Config.
+      /model [NAME]          switch model (fzf picker without a name)
+      /reasoning [EFFORT]    set effort ("default" = config/model default)
+      /mode [chat|code|exec|agent]
+      /attach PATH…          attach files to the next message
+      /new [NAME]            new session (or resume/create NAME)
+      /sessions              switch session (fzf picker)
+      /session               show the current session
+      /config                fzf config picker
+      /help, /exit
 
-      Models   Fuzzy list of cached models, current default marked with *.
+    In exec mode each reply is a command confirmed with [Y/n/e] and run;
+    the session continues afterwards.
+
+PICKERS (fzf)
+    Built on the real fzf/bat binaries (not a reimplementation) — your
+    FZF_DEFAULT_OPTS still apply.
+
+      Sessions (qp -S -t, /sessions)
+               The query searches session names and message contents (every
+               term must match, case-insensitive), re-run on each keystroke.
+               The preview lists each hit in context, highlighted, then the
+               end of the conversation. Enter makes the session current
+               (continue with qp -f); Alt-Enter opens it interactively.
+
+      Models (qp --model-set, /model)
+               Fuzzy list of cached models, current default marked with *.
                Right-hand preview: name, context length, price per 1M
                tokens (prompt/completion), input/output modalities, usage
                rank (only if --update-rankings has been run), and the
@@ -287,7 +322,8 @@ TUI (--tui)
                highlighted model as the new default. ctrl-r refreshes the
                cache from the provider in place.
 
-      Config   Fuzzy list of editable keys: default_model, reasoning_effort,
+      Config (qp --config-edit -t, /config)
+               Fuzzy list of editable keys: default_model, reasoning_effort,
                chat_system_prompt,
                execute_system_prompt, code_system_prompt, agent_system_prompt,
                system_prompt, ollama_model. Right-hand preview shows the live config.json
@@ -298,8 +334,7 @@ TUI (--tui)
                models (falls back to free-text entry if Ollama is
                unreachable); on any *_system_prompt key, opens $EDITOR on
                just that value. ctrl-e opens the whole config file in
-               $EDITOR at any time. Esc returns to the previous list; Esc
-               at the top menu exits.
+               $EDITOR at any time. Esc returns to the previous list.
 
 OLLAMA FALLBACK
     When the provider is unreachable (after retries) or no API key is set,
@@ -322,7 +357,7 @@ ENVIRONMENT
     XDG_CACHE_HOME      Cache directory (default: ~/.cache).
     XDG_CONFIG_HOME     Config directory (default: ~/.config).
     XDG_DATA_HOME       Data directory (default: ~/.local/share).
-    EDITOR              Editor for -e edit mode, --config-edit, and --tui
+    EDITOR              Editor for -e edit mode, --config-edit, and the pickers
                         text fields (default: vi).
     SHELL               Shell name used in execute-mode system prompt.
 
@@ -352,7 +387,7 @@ CONTEXT INJECTION
     Set persistent instructions with:
         qp --config-edit          # edit chat/execute/code/agent_system_prompt,
                                    # or add "system_prompt": "..."
-        qp --tui                  # or interactively, via Config
+        qp --config-edit -t       # or interactively (fzf)
 
 FILES
     ~/.config/quipcli/config.json       Persistent config: default_model,

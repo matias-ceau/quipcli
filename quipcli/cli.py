@@ -185,9 +185,31 @@ def build_parser() -> argparse.ArgumentParser:
         help="Show usage cost summary (1d, 7d default, 30d, or all), then exit.",
     )
     parser.add_argument(
+        "-t",
         "--tui",
         action="store_true",
-        help="Interactive fzf-based picker for models and config (requires fzf).",
+        help=(
+            "Interactive: alone (or with -f/-s/-e/-c/-a) opens a chat session, "
+            "words name it; with -S an fzf session picker; with --config-edit "
+            "the config picker."
+        ),
+    )
+    parser.add_argument(
+        "--_tui-session-lines",
+        dest="tui_session_lines",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="QUERY",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--_tui-session-preview",
+        dest="tui_session_preview",
+        nargs=2,
+        default=None,
+        metavar=("SESSION_ID", "QUERY"),
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--_tui-model-info",

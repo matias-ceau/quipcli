@@ -1,10 +1,13 @@
 [project]
 name = "quipcli"
 version = "0.4.0"
-description = "Minimal LLM CLI — ask questions, run AI-generated shell commands, optional fzf-based --tui"
+description = "Minimal LLM CLI — ask questions, run AI-generated shell commands, interactive sessions"
 readme = "README.md"
 requires-python = ">=3.14"
-dependencies = ["argcomplete"]
+dependencies = [
+    "argcomplete",
+    "prompt-toolkit>=3.0.53",
+]
 
 [dependency-groups]
 dev = [
