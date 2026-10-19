@@ -130,4 +130,8 @@ _MAX_FILE_BYTES = 20 * 1024 * 1024  # 20 MB warning threshold
 # OpenRouter's reasoning.effort values, highest first. Per-model support varies
 # (see the model cache's "reasoning.supported_efforts"); "none" is rejected by
 # models where reasoning is mandatory.
+# Max past messages resent with -f/-s (config "session_history" overrides;
+# 0 = unlimited) — keeps long sessions inside the model's context window.
+SESSION_HISTORY = 40
+
 REASONING_EFFORTS = ("max", "xhigh", "high", "medium", "low", "minimal", "none")

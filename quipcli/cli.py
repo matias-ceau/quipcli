@@ -85,24 +85,30 @@ def build_parser() -> argparse.ArgumentParser:
         + ' (default: config "reasoning_effort", else the model\'s own default).',
     )
     parser.add_argument(
-        "-S",
+        "-P",
         "--system",
         default=None,
         metavar="PROMPT",
         help="Override the system prompt.",
     )
     parser.add_argument(
+        "-S",
+        "--sessions",
+        action="store_true",
+        help="List sessions (most recent first) and exit.",
+    )
+    parser.add_argument(
         "-s",
         "--session",
         default=None,
         metavar="SESSION",
-        help="Session name or 'auto'. Displayed on stderr for reuse.",
+        help="Continue a session by name or id prefix, or start one with that name.",
     )
     parser.add_argument(
         "-f",
         "--follow-up",
         action="store_true",
-        help="Continue the last session in history.",
+        help="Continue the current (last used) session.",
     )
     parser.add_argument(
         "-i",
@@ -251,7 +257,7 @@ def get_content(
     sys.exit(1)
 
 
-def _print_stats(stats: _UsageStats | None) -> None:
+def _print_stats(stats: _UsageStats | None, session: str | None = None) -> None:
     if stats is None:
         return
     total_tok = stats.prompt_tokens + stats.completion_tokens
@@ -262,4 +268,6 @@ def _print_stats(stats: _UsageStats | None) -> None:
         parts.append(f"{total_tok} tok")
     if stats.cost_usd is not None:
         parts.append(f"${stats.cost_usd:.4f}")
+    if session:
+        parts.append(session)
     print(f"\033[2m  [{' | '.join(parts)}]\033[0m", file=sys.stderr)

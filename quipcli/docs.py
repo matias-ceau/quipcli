@@ -19,9 +19,11 @@ qp — quick reference
                                         persistent: config "reasoning_effort")
   qp -q ...                            suppress usage stats (and reasoning display)
   NO_COLOR=1 qp ...                    disable ANSI markdown styling
-  qp -s myconv ask something           start or continue a named session
-  qp -s auto ask something             auto-named session (name shown on stderr)
-  qp -f what did I just ask            follow-up on last session
+  qp -f what did I just ask            continue the current (last) session
+  qp -s myconv ask something           continue session "myconv" (name or id
+                                        prefix), or start one with that name
+  qp -S                                list sessions (● = current)
+  qp -P "be terse" ...                 override the system prompt
 
   qp --models                          list cached models (* = default)
   qp --models --in image               models accepting image input
@@ -58,7 +60,8 @@ NAME
     qp — minimal CLI for LLMs, with an optional fzf-based --tui
 
 SYNOPSIS
-    qp [-e|-c|-a] [-m MODEL] [-S SYSTEM] [-s SESSION|-f] [-i FILE] [-q] [words ...]
+    qp [-e|-c|-a] [-m MODEL] [-r EFFORT] [-P SYSTEM] [-s SESSION|-f] [-i FILE] [-q] [words ...]
+    qp -S
     qp --update-models | --update-rankings | --models [--in MOD] [--out MOD] | --model-get | --model-set [MODEL]
     qp --config-edit | --status | --cost [PERIOD] | --tui
     qp --tldr | --docs | --version
@@ -123,15 +126,19 @@ OPTIONS
                         (TTY only, hidden by -q) so the call never looks
                         stalled. Ctrl-C at any point exits with status 130.
 
-    -S, --system PROMPT Fully override the system prompt (skips machine context
+    -P, --system PROMPT Fully override the system prompt (skips machine context
                         and config "system_prompt" injection — use this for a
                         one-off, exact system message).
 
-    -s, --session NAME  Attach to a named session. Use 'auto' to generate a
-                        timestamped name (printed to stderr for reuse).
+    -S, --sessions      List sessions, most recently active first, and exit.
 
-    -f, --follow-up     Continue the last session in history. Mutually exclusive
-                        with --session. The session name is printed to stderr.
+    -s, --session REF   Continue the session whose name is REF, else whose id
+                        starts with REF (ambiguous prefix → error); if none
+                        matches, start a new session named REF.
+
+    -f, --follow-up     Continue the current session — the last one a prompt
+                        was sent to. Mutually exclusive with --session. The
+                        session is announced on stderr.
 
     -i, --input FILE    Explicitly pass a file as input. Repeatable. Media
                         files (see MULTIMODAL) are attached as multimodal
@@ -248,12 +255,22 @@ MODEL ROUTING
     is what goes into history/--cost.
 
 SESSIONS
-    Sessions group messages into multi-turn conversations. Each exchange
-    (without -s/-f) is a standalone interaction stored in history.
+    Every prompt belongs to a session. Without -s/-f a new one starts,
+    with a 6-hex-digit id and a short name taken from the prompt's first
+    significant words (e.g. "update-debtap-database"); the name is shown in
+    the usage-stats line. -f continues the current session; commands that
+    send no prompt (-S, --status, -h…) never change which one is current.
 
-    qp -s myproject explain the architecture
-    qp -s myproject what about the tests ?
-    qp -f any other suggestions ?   # continues last session
+    qp how do I update the debtap database   # new session
+    qp -f and what if it stalls ?            # same session
+    qp -S                                    # list (● = current)
+    qp -s 3f9a explain again                 # resume by id prefix
+    qp -s myproject explain the architecture # resume, or create "myproject"
+
+    Only the last 40 messages of a session are resent (config
+    "session_history"; 0 = everything), always starting on a user turn,
+    to stay within the model's context window. --status shows the current
+    session.
 
 TUI (--tui)
     Interactive picker built on the real fzf/bat binaries (not a
@@ -310,7 +327,7 @@ ENVIRONMENT
     SHELL               Shell name used in execute-mode system prompt.
 
 CONTEXT INJECTION
-    Unless -S/--system fully overrides it, every request's system prompt is
+    Unless -P/--system fully overrides it, every request's system prompt is
     built from up to three parts, in order:
       1. the per-mode prompt for the mode in use — chat_system_prompt,
          execute_system_prompt, code_system_prompt, or agent_system_prompt
@@ -344,7 +361,8 @@ FILES
                                          execute_system_prompt,
                                          code_system_prompt,
                                          agent_system_prompt, system_prompt,
-                                         ollama_model. Auto-created on first
+                                         ollama_model, session_history.
+                                         Auto-created on first
                                          run (the four prompt keys are
                                          seeded with defaults); edit it
                                          directly or via `qp --config-edit`.
@@ -354,7 +372,9 @@ FILES
     ~/.cache/quipcli/rankings.json      Cached OpenRouter usage ranking
                                          (only present after
                                          `qp --update-rankings`).
-    ~/.local/share/quipcli/history.db   Usage history + sessions (SQLite).
+    ~/.local/share/quipcli/history.db   Usage history + sessions (SQLite;
+                                         pre-existing named sessions are
+                                         migrated, keeping their name).
 
     On first run, if the above don't exist yet but a pre-rename
     ~/.config/llm-cmd (etc.) layout does, its config/cache/history are

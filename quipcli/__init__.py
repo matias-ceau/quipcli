@@ -27,11 +27,17 @@ from .context import _machine_context
 from .db import (
     _UsageStats,
     _cost_summary,
+    _current_session_id,
+    _find_session,
     _get_session_messages,
-    _last_session_id,
+    _list_sessions,
+    _name_from_prompt,
     _record_message,
     _record_usage,
     _resolve_session,
+    _save_session,
+    _Session,
+    _set_current_session,
 )
 from .models import (
     _check_modality_support,

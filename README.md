@@ -34,7 +34,7 @@ Then `qp -m <Tab>` completes model names. Substring match: typing `haiku` finds 
 ## Usage
 
 ```
-qp [-e|-c|-a] [-m MODEL] [-r EFFORT] [-S SYSTEM] [-s SESSION|-f] [-i FILE] [-q] [words ...]
+qp [-e|-c|-a] [-m MODEL] [-r EFFORT] [-P SYSTEM] [-s SESSION|-f] [-i FILE] [-q] [words ...]
 ```
 
 | Flag | Description |
@@ -47,8 +47,10 @@ qp [-e|-c|-a] [-m MODEL] [-r EFFORT] [-S SYSTEM] [-s SESSION|-f] [-i FILE] [-q] 
 | `--no-web` | With `-a`: disable the hosted web search/fetch tools for this call |
 | `-m MODEL` | Override model (default: `openai/gpt-4o-mini`). MODEL may be a substring matching a single cached model, e.g. `-m haiku` |
 | `-r EFFORT` | Reasoning effort for this call (`max`/`xhigh`/`high`/`medium`/`low`/`minimal`/`none`) — see below |
-| `-S PROMPT` | Override system prompt |
-| `-s SESSION` / `-f` | Named session, or follow up on the last one |
+| `-P PROMPT` | Override system prompt |
+| `-f` | Continue the current (last used) session — see [Sessions](#sessions) |
+| `-s REF` | Continue a session by name or id prefix, or start one named `REF` |
+| `-S` | List sessions (● = current) |
 | `-i FILE` | Attach a file (repeatable): images/PDF/audio/video (`.mp3 .wav .ogg .flac .m4a .aac .aiff`, `.mp4 .webm .mov .mpeg`) as multimodal content, any other text file inlined into the prompt |
 | `-q` | Quiet: suppress usage stats, informational stderr lines, and the reasoning display |
 | `--models` [`--in`/`--out`] | List cached models (marked default), filterable by modality |
@@ -70,6 +72,20 @@ cat error.log | qp            # stdin as the whole prompt
 git diff | qp summarize this  # words + piped context
 git diff | qp -e write a conventional commit command
 ```
+
+## Sessions
+
+Every prompt belongs to a session. A plain `qp …` starts a new one, with a 6-hex-digit id and a short name made from the prompt's first significant words (shown in the stats line). `-f` continues the *current* session — the last one you sent a prompt to; `qp -S`, `qp --status` or `qp -h` never change it.
+
+```bash
+qp how do I update the debtap database   # new session "update-debtap-database"
+qp -f and what if it stalls ?            # same session
+qp -S                                    # list sessions, most recent first
+qp -s 3f9a explain again                 # resume by id prefix…
+qp -s myproject explain the architecture # …or by name (created if it doesn't exist)
+```
+
+Only the last 40 messages are resent (config `session_history`, `0` = all), always starting on a user turn. `qp --status` shows the current session. Sessions recorded by older versions (`-s name`) are migrated automatically and keep their name.
 
 ## Agent mode (`-a`)
 
@@ -149,7 +165,7 @@ Valid values: `max`, `xhigh`, `high`, `medium`, `low`, `minimal`, `none`. Accept
 
 ### Persistent instructions + machine context
 
-Every request (unless `-S` fully overrides the system prompt) automatically gets:
+Every request (unless `-P` fully overrides the system prompt) automatically gets:
 
 1. the **per-mode prompt** for whichever mode is active — `chat_system_prompt`, `execute_system_prompt`, `code_system_prompt`, or `agent_system_prompt` in `config.json`. These are seeded with sensible defaults the first time `qp` runs (or on upgrade, for any key missing from an existing config), so they're plain editable JSON from the start, not buried in the Python source. `execute_system_prompt` may contain the literal placeholder `{shell}`, substituted with the invoking machine's actual `$SHELL` at request time — never baked in as a fixed name, so a `config.json` synced across machines with different shells stays correct. Editing these only changes wording/tone: the hard constraint they describe (no markdown fences in `-e` output) is also enforced in code, independent of what the prompt says.
 2. **machine context** — OS/distro, `$SHELL`, architecture — detected fresh on every call, so the same `config.json` is correct whether it's synced to an Arch box or a Mac. No more reminding the model what OS you're on.
