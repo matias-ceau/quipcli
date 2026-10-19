@@ -31,7 +31,10 @@ def _encode_file_content(path: Path) -> dict:
     if ext in _IMAGE_EXTS:
         return {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{data}"}}
     if ext in _PDF_EXTS:
-        return {"type": "file", "file": {"filename": path.name, "data": data}}
+        return {
+            "type": "file",
+            "file": {"filename": path.name, "file_data": f"data:{mime};base64,{data}"},
+        }
     if ext in _AUDIO_EXTS:
         return {
             "type": "input_audio",
@@ -39,7 +42,18 @@ def _encode_file_content(path: Path) -> dict:
         }
     if ext in _VIDEO_EXTS:
         return {"type": "video_url", "video_url": {"url": f"data:{mime};base64,{data}"}}
-    return {"type": "file", "file": {"filename": path.name, "data": data}}
+    return {
+        "type": "file",
+        "file": {"filename": path.name, "file_data": f"data:{mime};base64,{data}"},
+    }
+
+
+def _read_text_file(path: Path) -> str | None:
+    """Contents of a non-media -i file as text, or None if it isn't text."""
+    try:
+        return path.read_text(encoding="utf-8")
+    except UnicodeDecodeError, OSError:
+        return None
 
 
 def _build_user_content(
@@ -55,6 +69,7 @@ def _build_user_content(
     """
     text_tokens: list[str] = []
     media_parts: list[dict] = []
+    attached_text: list[str] = []
     detected: set[str] = set()
 
     def _add_file(path: Path) -> None:
@@ -71,10 +86,19 @@ def _build_user_content(
 
     for f in extra_files or []:
         p = Path(f)
-        if p.exists():
-            _add_file(p)
-        else:
+        if not p.is_file():
             print(f"Warning: input file not found: {f}", file=sys.stderr)
+        elif p.suffix.lower() in _MEDIA_EXTENSIONS:
+            _add_file(p)
+        elif (body := _read_text_file(p)) is not None:
+            # Plain-text attachments (code, logs, notes…) are inlined into the
+            # prompt — no provider accepts them as a binary "file" part.
+            attached_text.append(f"{p.name}:\n```\n{body.rstrip()}\n```")
+        else:
+            print(
+                f"Warning: {f} is neither a supported media type nor text — skipped.",
+                file=sys.stderr,
+            )
 
     for word in words:
         p = Path(word)
@@ -86,7 +110,7 @@ def _build_user_content(
         else:
             text_tokens.append(word)
 
-    prompt_text = " ".join(text_tokens)
+    prompt_text = "\n\n".join(filter(None, [" ".join(text_tokens), *attached_text]))
     if stdin_text:
         prompt_text = f"{prompt_text}\n\n{stdin_text}" if prompt_text else stdin_text
     if not media_parts:

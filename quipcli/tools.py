@@ -12,9 +12,16 @@ from pathlib import Path
 _MAX_OUTPUT_CHARS = 4000
 
 
+def _ask(prompt: str) -> str:
+    # The prompt goes to stderr (like the command preview above it) so it
+    # stays visible when stdout is redirected, e.g. `qp -a ... > answer.md`.
+    print(prompt, end="", file=sys.stderr, flush=True)
+    return input()
+
+
 def _confirm(prompt: str) -> bool:
     try:
-        choice = input(prompt).strip().lower()
+        choice = _ask(prompt).strip().lower()
     except EOFError, KeyboardInterrupt:
         print("\nAborted.", file=sys.stderr)
         return False

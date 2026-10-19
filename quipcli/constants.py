@@ -112,13 +112,19 @@ _MEDIA_EXTENSIONS: dict[str, str] = {
     ".mp3": "audio/mpeg",
     ".wav": "audio/wav",
     ".ogg": "audio/ogg",
+    ".flac": "audio/flac",
+    ".m4a": "audio/mp4",
+    ".aac": "audio/aac",
+    ".aiff": "audio/aiff",
     ".mp4": "video/mp4",
     ".webm": "video/webm",
+    ".mov": "video/mov",
+    ".mpeg": "video/mpeg",
 }
 _IMAGE_EXTS = frozenset({".jpg", ".jpeg", ".png", ".gif", ".webp"})
 _PDF_EXTS = frozenset({".pdf"})
-_AUDIO_EXTS = frozenset({".mp3", ".wav", ".ogg"})
-_VIDEO_EXTS = frozenset({".mp4", ".webm"})
+_AUDIO_EXTS = frozenset({".mp3", ".wav", ".ogg", ".flac", ".m4a", ".aac", ".aiff"})
+_VIDEO_EXTS = frozenset({".mp4", ".webm", ".mov", ".mpeg"})
 _MAX_FILE_BYTES = 20 * 1024 * 1024  # 20 MB warning threshold
 
 # OpenRouter's reasoning.effort values, highest first. Per-model support varies

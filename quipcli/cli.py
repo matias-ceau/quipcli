@@ -1,19 +1,12 @@
 import argparse
 import importlib.util
-import os
 import sys
 
 from . import constants
 from .config import DEFAULT_MODEL
-from .constants import DEFAULT_EXECUTE_SYSTEM_PROMPT
 from .db import _UsageStats
 from .models import _load_models
 from .multimodal import _build_user_content
-
-
-def _execute_prompt() -> str:
-    shell = os.path.basename(os.environ.get("SHELL", "/bin/bash"))
-    return DEFAULT_EXECUTE_SYSTEM_PROMPT.replace("{shell}", shell)
 
 
 def _positive_int(raw: str) -> int:

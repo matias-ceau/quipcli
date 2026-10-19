@@ -11,6 +11,7 @@ from .db import _UsageStats
 
 _RETRIABLE_STATUSES = {429, 500, 502, 503, 529}
 _RETRY_WAITS = (1, 2, 4)  # seconds between attempts (4 attempts total)
+_MAX_RETRY_AFTER = 30  # cap on a server-requested Retry-After, in seconds
 
 
 class _APIStatusError(Exception):
@@ -23,6 +24,20 @@ def _open_connection(parsed) -> http.client.HTTPConnection:
     return http.client.HTTPSConnection(
         parsed.netloc, context=constants._SSL_CTX, timeout=30
     )
+
+
+def _request_target(parsed) -> str:
+    # Keep the query string — some OpenAI-compatible endpoints (e.g. Azure's
+    # ?api-version=...) need it, and parsed.path alone silently drops it.
+    return f"{parsed.path}?{parsed.query}" if parsed.query else parsed.path
+
+
+def _retry_after(resp: http.client.HTTPResponse, default: int) -> int:
+    try:
+        value = int(resp.getheader("Retry-After") or "")
+    except ValueError:
+        return default
+    return min(max(value, default), _MAX_RETRY_AFTER)
 
 
 def _post_json(url: str, body: str, api_key: str) -> http.client.HTTPResponse:
@@ -40,7 +55,7 @@ def _post_json(url: str, body: str, api_key: str) -> http.client.HTTPResponse:
     for wait in (*_RETRY_WAITS, None):
         try:
             conn = _open_connection(parsed)
-            conn.request("POST", parsed.path, body, headers)
+            conn.request("POST", _request_target(parsed), body, headers)
             resp = conn.getresponse()
         except OSError as e:
             last_error = f"Connection error: {e}"
@@ -54,6 +69,8 @@ def _post_json(url: str, body: str, api_key: str) -> http.client.HTTPResponse:
             status_error = True
             if resp.status not in _RETRIABLE_STATUSES:
                 break
+            if wait is not None:
+                wait = _retry_after(resp, wait)
         if wait is None:
             break
         print(
@@ -81,8 +98,7 @@ def _ollama_models() -> list[str] | None:
 
 
 def _pick_ollama_model(models: list[str], cfg: dict) -> str:
-    # TODO(user): fallback-model policy — config "ollama_model" wins, otherwise
-    # first available. Other options: most recently pulled, or a preference list.
+    # Config "ollama_model" wins, otherwise the first model /api/tags lists.
     return cfg.get("ollama_model") or models[0]
 
 
@@ -99,7 +115,15 @@ def _ollama_fallback(
     print(
         f"\033[2m⚠ {reason} — falling back to Ollama ({model})\033[0m", file=sys.stderr
     )
-    body = json.dumps({**body_dict, "model": model})
+    fallback = {**body_dict, "model": model}
+    if "tools" in fallback:
+        # openrouter:* server tools are OpenRouter-only; Ollama would reject them.
+        fallback["tools"] = [
+            t
+            for t in fallback["tools"]
+            if not t.get("type", "").startswith("openrouter:")
+        ]
+    body = json.dumps(fallback)
     try:
         resp = _post_json(f"{constants._OLLAMA_URL}/v1/chat/completions", body, "")
         return resp, model
@@ -366,6 +390,14 @@ def _reasoning_style() -> tuple[str, str]:
     return "\033[2m", "\033[0m"
 
 
+def _stream_error_message(chunk: dict) -> str | None:
+    err = chunk.get("error")
+    if not err:
+        return None
+    msg = err.get("message") if isinstance(err, dict) else err
+    return str(msg or err)
+
+
 def call_llm_streaming(
     messages: list[dict],
     model: str,
@@ -373,10 +405,13 @@ def call_llm_streaming(
     render_markdown: bool = True,
     show_reasoning: bool = False,
     extra: dict | None = None,
+    echo: bool = True,
 ) -> tuple[str, _UsageStats | None]:
-    """`show_reasoning` streams the model's `delta.reasoning` tokens dimmed to
-    stderr (TTY only) — without it a reasoning model looks stalled until its
-    first content token, which can take minutes at high effort."""
+    """`show_reasoning` streams the model's reasoning tokens dimmed to stderr
+    (TTY only) — without it a reasoning model looks stalled until its first
+    content token, which can take minutes at high effort. `echo=False`
+    collects the content without printing it (used by -e, which shows the
+    command in its own confirm prompt)."""
     resp, model = _make_request(
         messages, model, stream=True, include_usage=collect_usage, extra=extra
     )
@@ -384,14 +419,16 @@ def call_llm_streaming(
     parts: list[str] = []
     renderer = (
         _MarkdownAnsiRenderer()
-        if render_markdown and _use_markdown_rendering()
+        if echo and render_markdown and _use_markdown_rendering()
         else None
     )
     show_reasoning = show_reasoning and sys.stderr.isatty()
     dim, reset = _reasoning_style()
     in_reasoning = False
+    stream_error: str | None = None
+    finish_reason: str | None = None
     while line := resp.readline():
-        text = line.decode().strip()
+        text = line.decode(errors="replace").strip()
         if not text.startswith("data: "):
             continue
         payload = text[6:]
@@ -399,25 +436,37 @@ def call_llm_streaming(
             break
         try:
             chunk = json.loads(payload)
+            # Mid-stream failures arrive as an SSE chunk with an "error" key
+            # (the HTTP status was already 200) — surface them, don't drop them.
+            stream_error = _stream_error_message(chunk) or stream_error
             choices = chunk.get("choices", [])
             if choices:
-                reasoning = choices[0]["delta"].get("reasoning") or ""
+                finish_reason = choices[0].get("finish_reason") or finish_reason
+                delta_obj = choices[0].get("delta") or {}
+                # "reasoning" is OpenRouter's field; "reasoning_content" is what
+                # DeepSeek/vLLM-style OpenAI-compatible servers send instead.
+                reasoning = (
+                    delta_obj.get("reasoning")
+                    or delta_obj.get("reasoning_content")
+                    or ""
+                )
                 if reasoning and show_reasoning:
                     if not in_reasoning:
                         print(dim, end="", file=sys.stderr)
                         in_reasoning = True
                     print(reasoning, end="", file=sys.stderr, flush=True)
-                delta = choices[0]["delta"].get("content", "")
+                delta = delta_obj.get("content") or ""
                 if delta and in_reasoning:
                     print(f"{reset}\n", file=sys.stderr, flush=True)
                     in_reasoning = False
                 if delta:
-                    rendered = renderer.render(delta) if renderer else delta
-                    print(rendered, end="", flush=True)
+                    if echo:
+                        rendered = renderer.render(delta) if renderer else delta
+                        print(rendered, end="", flush=True)
                     parts.append(delta)
             if collect_usage and "usage" in chunk:
                 usage_data = chunk["usage"]
-        except json.JSONDecodeError, KeyError, IndexError:
+        except json.JSONDecodeError, AttributeError, IndexError:
             pass
     if in_reasoning:
         print(f"{reset}\n", file=sys.stderr, flush=True)
@@ -425,7 +474,13 @@ def call_llm_streaming(
         tail = renderer.finish()
         if tail:
             print(tail, end="", flush=True)
-    print()
+    if echo:
+        print()
+    if stream_error:
+        print(f"Error: {stream_error}", file=sys.stderr)
+    elif not parts:
+        reason = f" (finish_reason: {finish_reason})" if finish_reason else ""
+        print(f"Warning: the model returned no content{reason}.", file=sys.stderr)
     stats = None
     if collect_usage and usage_data:
         stats = _UsageStats(
@@ -435,39 +490,3 @@ def call_llm_streaming(
             cost_usd=usage_data.get("cost"),
         )
     return "".join(parts), stats
-
-
-def call_llm_capture(
-    messages: list[dict],
-    model: str,
-    extra: dict | None = None,
-) -> tuple[str, _UsageStats | None]:
-    resp, model = _make_request(messages, model, stream=False, extra=extra)
-    raw = resp.read().decode(errors="replace")
-    try:
-        data = json.loads(raw)
-        # OpenRouter can return {"error": ...} with HTTP 200
-        if "error" in data or not data.get("choices"):
-            err = data.get("error")
-            msg = err.get("message") if isinstance(err, dict) else err
-            print(
-                f"Error: API returned no completion{': ' + str(msg) if msg else '.'}",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-        text = data["choices"][0]["message"]["content"].strip()
-    except json.JSONDecodeError, KeyError, TypeError, AttributeError:
-        print(f"Error: unexpected API response: {raw[:200]}", file=sys.stderr)
-        sys.exit(1)
-    usage = data.get("usage")
-    stats = (
-        _UsageStats(
-            model=model,
-            prompt_tokens=usage.get("prompt_tokens", 0),
-            completion_tokens=usage.get("completion_tokens", 0),
-            cost_usd=usage.get("cost"),
-        )
-        if usage
-        else None
-    )
-    return text, stats

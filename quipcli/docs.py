@@ -5,6 +5,7 @@ qp — quick reference
   git diff | qp summarize this         piped stdin is appended to the prompt
   qp describe this photo.jpg           multimodal: auto-detect files in words
   qp -i photo.jpg what is this         multimodal: explicit file input
+  qp -i notes.md summarize             text files are inlined into the prompt
   qp -e update all cargo bins          generate + confirm + run a shell command
   qp -c write a merge sort             generate code to stdout
   qp -a find and fix the failing test  agent mode: multi-turn tool-calling loop
@@ -68,7 +69,9 @@ DESCRIPTION
     word list, or supplied explicitly with -i.
     In chat mode on TTY output, markdown gets lightweight ANSI styling
     (headings, inline/fenced code, bold, list items, blockquotes) while
-    preserving streaming behavior.
+    preserving streaming behavior. A mid-stream provider error is printed
+    as "Error: ..." on stderr; an empty reply prints a warning with the
+    finish_reason instead of exiting silently.
 
     Everything is a single binary controlled by flags — there are no
     separate subcommand executables.
@@ -82,6 +85,9 @@ OPTIONS
 
     -e, --execute       Execute mode: generate a shell command, confirm, then run.
                         Prompts [Y/n/e] — Y is default (Enter to confirm).
+                        The reply is streamed silently (reasoning still shown
+                        dimmed on stderr) and only the command is displayed,
+                        in the prompt; a leading ``` fence or "$ " is stripped.
                         Press e to open the command in $EDITOR with context.
                         Mutually exclusive with -c/-a.
 
@@ -111,8 +117,8 @@ OPTIONS
                         levels vary per model; "none" is rejected by models
                         whose reasoning is mandatory; qp warns on stderr
                         when the model cache says the effort is unsupported
-                        (request still sent). While streaming (chat,
-                        -c), reasoning tokens are shown dimmed on stderr
+                        (request still sent). In every mode (chat, -c,
+                        -e, -a) reasoning tokens are shown dimmed on stderr
                         (TTY only, hidden by -q) so the call never looks
                         stalled. Ctrl-C at any point exits with status 130.
 
@@ -126,8 +132,12 @@ OPTIONS
     -f, --follow-up     Continue the last session in history. Mutually exclusive
                         with --session. The session name is printed to stderr.
 
-    -i, --input FILE    Explicitly pass a file as multimodal input. Repeatable.
-                        Files are also auto-detected from words by extension.
+    -i, --input FILE    Explicitly pass a file as input. Repeatable. Media
+                        files (see MULTIMODAL) are attached as multimodal
+                        content; any other UTF-8 text file is inlined into
+                        the prompt as a fenced block; other binary files are
+                        skipped with a warning. Media files are also
+                        auto-detected from words by extension.
 
     -q, --quiet         Suppress post-response usage stats (model, tokens, cost),
                         the informational Model:/Session: stderr lines, and
@@ -179,8 +189,8 @@ MULTIMODAL
     Supported input formats:
       Images : .jpg .jpeg .png .gif .webp  (also accepts https:// image URLs)
       PDFs   : .pdf
-      Audio  : .mp3 .wav .ogg
-      Video  : .mp4 .webm
+      Audio  : .mp3 .wav .ogg .flac .m4a .aac .aiff
+      Video  : .mp4 .webm .mov .mpeg
 
     If the selected model does not support the required input modality, qp
     prints an error and lists compatible models from the cache.
@@ -201,9 +211,14 @@ AGENT MODE (-a)
                        openrouter:web_fetch server tools (unless --no-web).
                        These run entirely on OpenRouter's side — no local
                        code, no extra config, billed as normal API usage.
+                       Only sent when the provider is OpenRouter (and never
+                       to the Ollama fallback) — other providers reject them.
 
-    The loop stops after --max-steps iterations (default 12) if the model
-    hasn't produced a final answer yet, returning whatever it has so far.
+    While the model thinks, a dim "thinking…" line shows on stderr, and its
+    reasoning (if any) is printed dimmed after each step (TTY only, hidden
+    by -q). If --max-steps iterations (default 12) pass without a final
+    answer, qp makes one last call with tools disabled so the model has to
+    summarize what it found.
     Token/cost usage accumulates across all steps into one usage-stats line.
 
     The system prompt for this mode is agent_system_prompt in config.json,
@@ -269,7 +284,9 @@ OLLAMA FALLBACK
     The model is taken from the "ollama_model" config key, or the first
     locally available model otherwise. http:// endpoints (e.g. a permanent
     LLM_CMD_API_URL pointing at Ollama) never require an API key.
-    Transient provider errors (429/5xx) are retried with backoff first;
+    Transient provider errors (429/5xx) are retried with backoff first
+    (honouring a Retry-After header, capped at 30s); hosted openrouter:*
+    tools are dropped from requests sent to Ollama;
     authentication errors (401…) do NOT trigger the fallback.
 
 ENVIRONMENT
@@ -325,7 +342,9 @@ FILES
                                          run (the four prompt keys are
                                          seeded with defaults); edit it
                                          directly or via `qp --config-edit`.
-    ~/.cache/quipcli/models.json        Cached model list (12h TTL).
+    ~/.cache/quipcli/models.json        Cached model list (12h TTL; a failed
+                                         background refresh is retried at
+                                         most once an hour).
     ~/.cache/quipcli/rankings.json      Cached OpenRouter usage ranking
                                          (only present after
                                          `qp --update-rankings`).

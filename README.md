@@ -40,7 +40,7 @@ qp [-e|-c|-a] [-m MODEL] [-r EFFORT] [-S SYSTEM] [-s SESSION|-f] [-i FILE] [-q] 
 | Flag | Description |
 |------|-------------|
 | *(none)* | Ask a question, stream the answer |
-| `-e` | Generate a shell command, confirm `[Y/n/e]`, run it. Mutually exclusive with `-c`/`-a` |
+| `-e` | Generate a shell command, confirm `[Y/n/e]`, run it (only the command is shown, in the prompt; stray ``` fences / `$ ` are stripped). Mutually exclusive with `-c`/`-a` |
 | `-c` | Generate code, print to stdout. Mutually exclusive with `-e`/`-a` |
 | `-a` | Agent mode: multi-turn tool-calling loop — see below. Mutually exclusive with `-e`/`-c` |
 | `--max-steps N` | With `-a`: max tool-calling loop iterations (default: 12) |
@@ -49,6 +49,7 @@ qp [-e|-c|-a] [-m MODEL] [-r EFFORT] [-S SYSTEM] [-s SESSION|-f] [-i FILE] [-q] 
 | `-r EFFORT` | Reasoning effort for this call (`max`/`xhigh`/`high`/`medium`/`low`/`minimal`/`none`) — see below |
 | `-S PROMPT` | Override system prompt |
 | `-s SESSION` / `-f` | Named session, or follow up on the last one |
+| `-i FILE` | Attach a file (repeatable): images/PDF/audio/video (`.mp3 .wav .ogg .flac .m4a .aac .aiff`, `.mp4 .webm .mov .mpeg`) as multimodal content, any other text file inlined into the prompt |
 | `-q` | Quiet: suppress usage stats, informational stderr lines, and the reasoning display |
 | `--models` [`--in`/`--out`] | List cached models (marked default), filterable by modality |
 | `--model-get` / `--model-set [MODEL]` | Print / set the default model |
@@ -60,7 +61,7 @@ qp [-e|-c|-a] [-m MODEL] [-r EFFORT] [-S SYSTEM] [-s SESSION|-f] [-i FILE] [-q] 
 | `--update-rankings` | Cache OpenRouter's top-50 daily usage ranking (needs an OpenRouter key; usage volume, not a quality score — shown in `--tui`'s model preview once cached) |
 | `--version` | Print version |
 
-Chat responses render lightweight ANSI markdown styling on TTYs (headings, code spans/blocks, bold, list items, blockquotes) while still streaming token-by-token. Disable colors with `NO_COLOR=1`.
+Chat responses render lightweight ANSI markdown styling on TTYs (headings, code spans/blocks, bold, list items, blockquotes) while still streaming token-by-token. Disable colors with `NO_COLOR=1`. A provider error that arrives mid-stream is printed as `Error: …`, and an empty reply prints a warning with its `finish_reason` rather than exiting silently.
 
 Stdin is also supported, alone or combined with a prompt (piped content is appended after the words):
 
@@ -79,7 +80,7 @@ qp -a --max-steps 5 --no-web refactor the imports in quipcli/cli.py
 
 Runs a multi-turn tool-calling loop instead of a single one-shot reply, so it can go beyond oneliners: read files, run shell commands, write files, and (unless `--no-web`) search/fetch the web via OpenRouter's hosted `openrouter:web_search`/`openrouter:web_fetch` server tools — those two run entirely on OpenRouter's side, so there's nothing extra to configure or pay for beyond your normal API usage.
 
-`run_shell` and `write_file` always prompt `[Y/n]` before doing anything — same confirm-first posture as `-e`. Declining just tells the model to try another approach; it doesn't abort the run. `read_file` runs without confirmation. The loop stops after `--max-steps` iterations (default 12) if the model doesn't converge on a final answer.
+`run_shell` and `write_file` always prompt `[Y/n]` before doing anything — same confirm-first posture as `-e`. Declining just tells the model to try another approach; it doesn't abort the run. `read_file` runs without confirmation. A dim `thinking…` line (and the model's reasoning, if any) shows on stderr between steps. If `--max-steps` (default 12) runs out, `qp` makes one last call with tools disabled so the model summarizes what it found. The hosted web tools are only sent to OpenRouter — other providers (and the Ollama fallback) would reject them.
 
 The prompt for this mode lives in `agent_system_prompt` in `config.json`, seeded like the other per-mode prompts — edit it with `qp --config-edit` or `qp --tui`.
 
@@ -97,7 +98,7 @@ See OpenRouter's [Auto Router](https://openrouter.ai/docs/guides/routing/routers
 
 ### Offline / Ollama fallback
 
-If the provider is unreachable (after automatic retries) or no API key is set, `qp` transparently falls back to a local [Ollama](https://ollama.com) instance when one is running. The local model comes from the `"ollama_model"` config key, or the first available model otherwise. Override the Ollama URL with `LLM_CMD_OLLAMA_URL` (default `http://localhost:11434`).
+If the provider is unreachable (after automatic retries) or no API key is set, `qp` transparently falls back to a local [Ollama](https://ollama.com) instance when one is running. The local model comes from the `"ollama_model"` config key, or the first available model otherwise. Override the Ollama URL with `LLM_CMD_OLLAMA_URL` (default `http://localhost:11434`). Retries honour the provider's `Retry-After` header (capped at 30 s).
 
 ## Interactive TUI (`--tui`)
 
@@ -135,7 +136,7 @@ Most of these have no config.json equivalent at all (API key, API URL, Ollama UR
 
 ### Reasoning models
 
-Reasoning models (GLM, DeepSeek, Gemini, Claude…) think before answering. `qp` streams those reasoning tokens **dimmed on stderr** as they arrive (TTY only, hidden by `-q`), then the answer on stdout — so a long think never looks like a hang, and piping stdout stays clean. Ctrl-C exits cleanly (status 130), no traceback.
+Reasoning models (GLM, DeepSeek, Gemini, Claude…) think before answering. `qp` streams those reasoning tokens (OpenRouter's `reasoning`, or `reasoning_content` from DeepSeek/vLLM-style servers) **dimmed on stderr** in every mode — chat, `-c`, `-e`, `-a` — as they arrive (TTY only, hidden by `-q`), then the answer on stdout — so a long think never looks like a hang, and piping stdout stays clean. Ctrl-C exits cleanly (status 130), no traceback.
 
 Some models default to a very high effort (e.g. `z-ai/glm-5.3-flash` defaults to `max` and can think for ~2 minutes). Control it with OpenRouter's `reasoning.effort`:
 
