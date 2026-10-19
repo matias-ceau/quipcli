@@ -3458,3 +3458,56 @@ class TestAtomicWrite:
         target = tmp_path / "out.json"
         quipcli.constants._atomic_write_text(target, "x")
         assert [p.name for p in tmp_path.iterdir()] == ["out.json"]
+
+
+# ── Real (served) model reporting ─────────────────────────────────────────────
+
+
+class TestServedModel:
+    def _msgs(self):
+        return [{"role": "user", "content": "p"}]
+
+    def test_served_model_helper(self):
+        assert quipcli.db._served_model("openrouter/auto", "anthropic/x") == (
+            "anthropic/x",
+            "openrouter/auto",
+        )
+        assert quipcli.db._served_model(
+            "openai/gpt-4o", "openai/gpt-4o-2024-08-06"
+        ) == (
+            "openai/gpt-4o",
+            None,
+        )
+        assert quipcli.db._served_model("m", None) == ("m", None)
+
+    def test_streaming_reports_routed_model(self, mock_http, capsys):
+        lines = [
+            b'data: {"model":"anthropic/claude-x","choices":[{"delta":{"content":"hi"}}]}\n',
+            (
+                b'data: {"model":"anthropic/claude-x","choices":[],'
+                b'"usage":{"prompt_tokens":1,"completion_tokens":1}}\n'
+            ),
+            b"data: [DONE]\n",
+        ]
+        mock_http(MockHTTPResponse(200, b"", lines))
+        _, stats = quipcli.call_llm_streaming(
+            self._msgs(), "openrouter/auto", collect_usage=True
+        )
+        assert stats is not None
+        assert stats.model == "anthropic/claude-x"
+        assert stats.routed_from == "openrouter/auto"
+        quipcli._print_stats(stats)
+        assert "openrouter/auto → anthropic/claude-x" in capsys.readouterr().err
+
+    def test_agent_reports_routed_model(self, mock_http):
+        body = json.dumps(
+            {
+                "model": "openai/gpt-5",
+                "choices": [{"message": {"role": "assistant", "content": "done"}}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+            }
+        ).encode()
+        mock_http(MockHTTPResponse(200, body))
+        _, stats = quipcli.run_agent_loop(self._msgs(), "openrouter/auto")
+        assert stats is not None
+        assert (stats.model, stats.routed_from) == ("openai/gpt-5", "openrouter/auto")

@@ -7,7 +7,7 @@ import time
 from urllib.parse import urlparse
 
 from . import constants
-from .db import _UsageStats
+from .db import _served_model, _UsageStats
 
 _RETRIABLE_STATUSES = {429, 500, 502, 503, 529}
 _RETRY_WAITS = (1, 2, 4)  # seconds between attempts (4 attempts total)
@@ -427,6 +427,7 @@ def call_llm_streaming(
     in_reasoning = False
     stream_error: str | None = None
     finish_reason: str | None = None
+    served: str | None = None
     while line := resp.readline():
         text = line.decode(errors="replace").strip()
         if not text.startswith("data: "):
@@ -439,6 +440,7 @@ def call_llm_streaming(
             # Mid-stream failures arrive as an SSE chunk with an "error" key
             # (the HTTP status was already 200) — surface them, don't drop them.
             stream_error = _stream_error_message(chunk) or stream_error
+            served = chunk.get("model") or served
             choices = chunk.get("choices", [])
             if choices:
                 finish_reason = choices[0].get("finish_reason") or finish_reason
@@ -483,10 +485,12 @@ def call_llm_streaming(
         print(f"Warning: the model returned no content{reason}.", file=sys.stderr)
     stats = None
     if collect_usage and usage_data:
+        real, routed_from = _served_model(model, served)
         stats = _UsageStats(
-            model=model,
+            model=real,
             prompt_tokens=usage_data.get("prompt_tokens", 0),
             completion_tokens=usage_data.get("completion_tokens", 0),
             cost_usd=usage_data.get("cost"),
+            routed_from=routed_from,
         )
     return "".join(parts), stats

@@ -15,6 +15,18 @@ class _UsageStats:
     prompt_tokens: int = 0
     completion_tokens: int = 0
     cost_usd: float | None = None
+    # Set when the provider served a different model than the one requested
+    # (e.g. a router like openrouter/auto): `model` is then the real one.
+    routed_from: str | None = None
+
+
+def _served_model(requested: str, served: str | None) -> tuple[str, str | None]:
+    """(model to report, routed_from). A served id that merely extends the
+    requested one (dated snapshot, e.g. gpt-4o → gpt-4o-2024-08-06) isn't
+    reported as routing."""
+    if not served or served.startswith(requested):
+        return requested, None
+    return served, requested
 
 
 # Paths whose schema was already ensured in this process — a single `qp` call

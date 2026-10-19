@@ -255,7 +255,9 @@ def _print_stats(stats: _UsageStats | None) -> None:
     if stats is None:
         return
     total_tok = stats.prompt_tokens + stats.completion_tokens
-    parts = [stats.model]
+    parts = [
+        f"{stats.routed_from} → {stats.model}" if stats.routed_from else stats.model
+    ]
     if total_tok:
         parts.append(f"{total_tok} tok")
     if stats.cost_usd is not None:

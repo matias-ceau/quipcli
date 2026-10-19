@@ -12,7 +12,7 @@ import json
 import sys
 
 from . import constants
-from .db import _UsageStats
+from .db import _served_model, _UsageStats
 from .http_client import _make_request, _MarkdownAnsiRenderer, _use_markdown_rendering
 from .tools import default_tools, execute_tool_call
 
@@ -48,7 +48,7 @@ class _Progress:
 
 
 def _step(messages: list[dict], model: str, extra: dict) -> tuple[dict, dict, str]:
-    """One non-streaming chat-completions call → (message, usage, model used)."""
+    """One non-streaming chat-completions call → (message, usage, model served)."""
     resp, used_model = _make_request(messages, model, stream=False, extra=extra)
     raw = resp.read().decode(errors="replace")
     try:
@@ -64,7 +64,11 @@ def _step(messages: list[dict], model: str, extra: dict) -> tuple[dict, dict, st
             file=sys.stderr,
         )
         sys.exit(1)
-    return data["choices"][0]["message"], data.get("usage") or {}, used_model
+    return (
+        data["choices"][0]["message"],
+        data.get("usage") or {},
+        data.get("model") or used_model,
+    )
 
 
 def run_agent_loop(
@@ -94,8 +98,10 @@ def run_agent_loop(
 
     def _finish(text: str) -> tuple[str, _UsageStats]:
         _print_final(text, render_markdown)
+        real, routed_from = _served_model(model, used_model)
         return text, _UsageStats(
-            model=used_model,
+            model=real,
+            routed_from=routed_from,
             prompt_tokens=total_prompt,
             completion_tokens=total_completion,
             cost_usd=cost if have_cost else None,

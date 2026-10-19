@@ -12,6 +12,7 @@ qp — quick reference
   qp -a --no-web ...                   agent mode without hosted web search/fetch
   qp -m anthropic/claude-3 ...         use a specific model
   qp -m openrouter/auto-beta ...       Auto Router: picks a model per-prompt
+                                        (stats show "router → real model")
   qp -m openrouter/pareto-code -c ...  Pareto Router: best coder for the price
   qp -r low ...                        reasoning effort for this call
                                         (max/xhigh/high/medium/low/minimal/none;
@@ -240,6 +241,11 @@ MODEL ROUTING
     See https://openrouter.ai/docs/guides/routing for details. Persist any
     of these as your default the same way as any other model name:
     qp --model-set openrouter/auto-beta.
+
+    The usage-stats line always names the model that actually answered:
+    when it differs from the one requested (a router, or the Ollama
+    fallback) it reads "openrouter/auto → deepseek/...", and the real model
+    is what goes into history/--cost.
 
 SESSIONS
     Sessions group messages into multi-turn conversations. Each exchange
