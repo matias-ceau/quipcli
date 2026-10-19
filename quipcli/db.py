@@ -183,7 +183,7 @@ _STOPWORDS_TEXT = (
     " should so some tell that the their there these this to use was what when"
     " where which who why will with would you your"
     # French
-    " au aux avec ce ces cet cette comment dans de des donne du elle en est et"
+    " au aux avec ce ces cet cette comment dans de des dis donne du elle en est et"
     " faire fais il ils je la le les leur ma me mes moi mon ne nous on ou par pas"
     " plus pour pourquoi quel quelle quels quelles que quoi qui sa se ses son"
     " sont sur ta te tes toi ton tu un une vous"
@@ -201,6 +201,14 @@ class _Session:
     @property
     def label(self) -> str:
         return f"{self.name} ({self.id})" if self.name else self.id
+
+
+def _age(ts: float) -> str:
+    secs = max(0, int(time.time() - ts))
+    for unit, size in (("d", 86400), ("h", 3600), ("m", 60)):
+        if secs >= size:
+            return f"{secs // size}{unit}"
+    return f"{secs}s"
 
 
 def _new_session_id(conn: sqlite3.Connection) -> str:
@@ -254,8 +262,6 @@ def _get_session_messages(session_id: str, limit: int | None = None) -> list[dic
     except sqlite3.Error, OSError:
         return []
     rows.reverse()
-    while limit and rows and rows[0][0] != "user":
-        rows.pop(0)
     result = []
     for role, content in rows:
         try:
@@ -266,7 +272,18 @@ def _get_session_messages(session_id: str, limit: int | None = None) -> list[dic
         except json.JSONDecodeError, ValueError:
             pass
         result.append({"role": role, "content": content})
-    return result
+    return _trim_history(result, limit)
+
+
+def _trim_history(messages: list[dict], limit: int | None) -> list[dict]:
+    """Last `limit` messages (all if falsy), starting on a user turn — some
+    providers reject a history that opens with an assistant message."""
+    if not limit:
+        return messages
+    kept = messages[-limit:]
+    while kept and kept[0]["role"] != "user":
+        kept = kept[1:]
+    return kept
 
 
 def _current_session_id() -> str | None:
@@ -340,10 +357,19 @@ def _session_info(session_id: str) -> tuple[str, int] | None:
     return (row[0], row[1]) if row else None
 
 
-def _list_sessions(limit: int = 50) -> list[dict]:
-    """Most recently active sessions first."""
+def _list_sessions(limit: int = 50, query: str = "") -> list[dict]:
+    """Most recently active sessions first. `query`: every whitespace-separated
+    term must appear (case-insensitive) in the session name or a message."""
     if not constants._HISTORY_DB.exists():
         return []
+    where, params = [], []
+    for term in query.split():
+        pattern = "%" + re.sub(r"([\\%_])", r"\\\1", term) + "%"
+        where.append(
+            "(s.name LIKE ? ESCAPE '\\' OR EXISTS (SELECT 1 FROM messages x"
+            " WHERE x.session_id = s.id AND x.content LIKE ? ESCAPE '\\'))"
+        )
+        params += [pattern, pattern]
     try:
         with _db_conn() as conn:
             rows = conn.execute(
@@ -351,8 +377,9 @@ def _list_sessions(limit: int = 50) -> list[dict]:
                 " (SELECT content FROM messages WHERE session_id = s.id"
                 "  AND role = 'user' ORDER BY ts, id LIMIT 1)"
                 " FROM sessions s JOIN messages m ON m.session_id = s.id"
-                " GROUP BY s.id ORDER BY MAX(m.ts) DESC LIMIT ?",
-                (limit,),
+                + (" WHERE " + " AND ".join(where) if where else "")
+                + " GROUP BY s.id ORDER BY MAX(m.ts) DESC LIMIT ?",
+                (*params, limit),
             ).fetchall()
     except sqlite3.Error, OSError:
         return []

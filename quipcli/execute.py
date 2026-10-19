@@ -55,22 +55,34 @@ def _edit_text_value(current: str) -> str:
         os.unlink(tmpfile)
 
 
-def confirm_and_run(command: str, prompt: str) -> None:
+def run_confirmed(command: str, prompt: str) -> int | None:
+    """Show the command, ask [Y/n/e], run it on yes. Returns its exit status,
+    or None when nothing ran (empty command, declined, Ctrl-C/Ctrl-D)."""
     command = _strip_fences(command)
     while True:
         if not command:
             print("Error: no command to run.", file=sys.stderr)
-            sys.exit(1)
+            return None
         print(f"\n\033[1;32m$ {command}\033[0m", file=sys.stderr)
         try:
             choice = _ask("Run this command? [Y/n/e] ").strip().lower()
         except EOFError, KeyboardInterrupt:
             print("\nAborted.", file=sys.stderr)
-            sys.exit(0)
+            return None
         if choice in ("y", "yes", ""):
-            sys.exit(subprocess.run(command, shell=True, check=False).returncode)
+            return subprocess.run(command, shell=True, check=False).returncode
         elif choice == "e":
             command = _edit_in_editor(command, prompt)
         else:
             print("Aborted.", file=sys.stderr)
-            sys.exit(0)
+            return None
+
+
+def confirm_and_run(command: str, prompt: str) -> None:
+    """One-shot -e: like run_confirmed, then exit with the command's status
+    (0 when declined, 1 when there was nothing to run)."""
+    if not _strip_fences(command):
+        print("Error: no command to run.", file=sys.stderr)
+        sys.exit(1)
+    status = run_confirmed(command, prompt)
+    sys.exit(0 if status is None else status)

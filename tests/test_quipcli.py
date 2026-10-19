@@ -6,6 +6,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import ClassVar
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -1547,21 +1548,21 @@ class TestReasoning:
         return [{"role": "user", "content": "hi"}]
 
     def test_reasoning_extra_cli_wins_over_config(self):
-        from quipcli.entry import _reasoning_extra
+        from quipcli.turn import _reasoning_extra
 
         assert _reasoning_extra("low", {"reasoning_effort": "high"}) == {
             "reasoning": {"effort": "low"}
         }
 
     def test_reasoning_extra_from_config(self):
-        from quipcli.entry import _reasoning_extra
+        from quipcli.turn import _reasoning_extra
 
         assert _reasoning_extra(None, {"reasoning_effort": "high"}) == {
             "reasoning": {"effort": "high"}
         }
 
     def test_reasoning_extra_absent_sends_nothing(self):
-        from quipcli.entry import _reasoning_extra
+        from quipcli.turn import _reasoning_extra
 
         assert _reasoning_extra(None, {}) is None
         assert _reasoning_extra(None, {"reasoning_effort": ""}) is None
@@ -2978,8 +2979,8 @@ class TestMainDispatch:
             patch("subprocess.Popen"),
             patch("http.client.HTTPSConnection") as cls,
             patch("quipcli.constants._API_KEY", "key"),
-            patch("quipcli.entry._record_usage") as record_usage,
-            patch("quipcli.entry._record_message") as record_message,
+            patch("quipcli.turn._record_usage") as record_usage,
+            patch("quipcli.turn._record_message") as record_message,
         ):
             cls.return_value = _mock_conn(resp)
             quipcli.main()
@@ -3033,7 +3034,7 @@ class TestMainDispatch:
             patch("subprocess.Popen"),
             patch("http.client.HTTPSConnection") as cls,
             patch("quipcli.constants._API_KEY", "key"),
-            patch("quipcli.entry._record_usage") as record_usage,
+            patch("quipcli.turn._record_usage") as record_usage,
             patch("builtins.input", return_value="n"),
         ):
             cls.return_value = _mock_conn(resp)
@@ -3059,7 +3060,7 @@ class TestMainDispatch:
             patch("subprocess.Popen"),
             patch("http.client.HTTPSConnection") as cls,
             patch("quipcli.constants._API_KEY", "key"),
-            patch("quipcli.entry._record_usage") as record_usage,
+            patch("quipcli.turn._record_usage") as record_usage,
         ):
             cls.return_value = _mock_conn(resp)
             quipcli.main()
@@ -3077,7 +3078,7 @@ class TestMainDispatch:
             patch("subprocess.Popen"),
             patch("http.client.HTTPSConnection") as cls,
             patch("quipcli.constants._API_KEY", "key"),
-            patch("quipcli.entry._record_usage") as record_usage,
+            patch("quipcli.turn._record_usage") as record_usage,
         ):
             cls.return_value = _mock_conn(resp)
             quipcli.main()
@@ -3455,40 +3456,26 @@ class TestConfigView:
         run_fzf.assert_called_once()
 
 
-class TestRunTui:
-    def test_missing_fzf_exits_with_error(self, capsys):
+class TestTuiCombos:
+    def test_config_edit_with_t_requires_fzf(self, monkeypatch, capsys):
+        monkeypatch.setattr(sys, "argv", ["qp", "--config-edit", "-t"])
         with (
+            patch("subprocess.Popen"),
             patch("quipcli.tui._fzf_available", return_value=False),
             pytest.raises(SystemExit) as exc,
         ):
-            quipcli.run_tui()
+            quipcli.main()
         assert exc.value.code == 1
-        assert "requires fzf" in capsys.readouterr().err
+        assert "require fzf" in capsys.readouterr().err
 
-    def test_escape_at_top_menu_returns(self):
+    def test_config_edit_with_t_opens_config_view(self, monkeypatch):
+        monkeypatch.setattr(sys, "argv", ["qp", "--config-edit", "-t"])
         with (
+            patch("subprocess.Popen"),
             patch("quipcli.tui._fzf_available", return_value=True),
-            patch("quipcli.tui._run_fzf", return_value=None) as run_fzf,
-        ):
-            quipcli.run_tui()
-        run_fzf.assert_called_once()
-
-    def test_selecting_models_then_escaping_returns_to_menu(self):
-        with (
-            patch("quipcli.tui._fzf_available", return_value=True),
-            patch("quipcli.tui._run_fzf", side_effect=["Models", None]),
-            patch("quipcli.tui._models_view") as models_view,
-        ):
-            quipcli.run_tui()
-        models_view.assert_called_once_with(picker_mode=False)
-
-    def test_selecting_config_then_escaping_returns_to_menu(self):
-        with (
-            patch("quipcli.tui._fzf_available", return_value=True),
-            patch("quipcli.tui._run_fzf", side_effect=["Config", None]),
             patch("quipcli.tui._config_view") as config_view,
         ):
-            quipcli.run_tui()
+            quipcli.main()
         config_view.assert_called_once()
 
 
@@ -3591,3 +3578,263 @@ class TestServedModel:
         _, stats = quipcli.run_agent_loop(self._msgs(), "openrouter/auto")
         assert stats is not None
         assert (stats.model, stats.routed_from) == ("openai/gpt-5", "openrouter/auto")
+
+
+# ── Interactive session (-t) + sessions picker (-S -t) ────────────────────────
+
+
+def _sse_answer(text: str) -> MockHTTPResponse:
+    chunk = json.dumps({"choices": [{"delta": {"content": text}}]}).encode()
+    usage = json.dumps(
+        {"choices": [], "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
+    ).encode()
+    return MockHTTPResponse(
+        200,
+        b"",
+        [b"data: " + chunk + b"\n", b"data: " + usage + b"\n", b"data: [DONE]\n"],
+    )
+
+
+class _FakePromptSession:
+    inputs: ClassVar[list] = []
+
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+
+    def prompt(self, *_args, **_kwargs):
+        item = type(self).inputs.pop(0)
+        if isinstance(item, BaseException):
+            raise item
+        return item
+
+
+@pytest.fixture
+def isolated_db(tmp_path):
+    with (
+        patch("quipcli.constants._HISTORY_DB", tmp_path / "history.db"),
+        patch("quipcli.constants._DATA_DIR", tmp_path),
+        patch("quipcli.constants._CONFIG_FILE", tmp_path / "config.json"),
+        patch("quipcli.constants._CONFIG_DIR", tmp_path),
+    ):
+        yield tmp_path
+
+
+class TestInteractive:
+    def _run(self, inputs, answers, session=None, mode="chat"):
+        _FakePromptSession.inputs = list(inputs)
+        opts = quipcli.TurnOptions(model="m", mode=mode)
+        session = session or quipcli.db._fresh_session()
+        conns = [_mock_conn(a) for a in answers]
+        with (
+            patch("prompt_toolkit.PromptSession", _FakePromptSession),
+            patch("sys.stdin.isatty", return_value=True),
+            patch("sys.stdout.isatty", return_value=True),
+            patch("http.client.HTTPSConnection", side_effect=conns),
+            patch("quipcli.constants._API_KEY", "key"),
+        ):
+            quipcli.run_interactive(opts, session)
+        return session, opts, conns
+
+    def _sent(self, conn):
+        _, _, body, _ = conn.request.call_args[0]
+        return json.loads(body)
+
+    def test_turns_share_history_and_commands_apply(self, isolated_db, capsys):
+        session, opts, conns = self._run(
+            ["hello there", "/reasoning low", "/mode code", "again", EOFError()],
+            [_sse_answer("hi"), _sse_answer("print(1)")],
+        )
+        second = self._sent(conns[1])
+        assert [m["content"] for m in second["messages"][1:]] == [
+            "hello there",
+            "hi",
+            "again",
+        ]
+        assert second["reasoning"] == {"effort": "low"}
+        assert opts.mode == "code"
+        assert session.name == "hello"
+        assert quipcli._current_session_id() == session.id
+        assert "resume with qp -f" in capsys.readouterr().out
+
+    def test_ctrl_c_during_turn_keeps_session_alive(self, isolated_db, capsys):
+        with patch("quipcli.interactive.run_turn", side_effect=KeyboardInterrupt):
+            session, _, _ = self._run(["first", "/exit"], [])
+        assert "Interrupted." in capsys.readouterr().err
+        assert session.messages == []
+
+    def test_api_error_does_not_leave_session(self, isolated_db):
+        with patch("quipcli.interactive.run_turn", side_effect=SystemExit(1)) as turn:
+            self._run(["a", "b", EOFError()], [])
+        assert turn.call_count == 2
+
+    def test_execute_mode_confirms_without_exiting(self, isolated_db):
+        with (
+            patch("quipcli.turn.run_confirmed", return_value=0) as confirmed,
+            patch("quipcli.turn.confirm_and_run") as one_shot,
+        ):
+            self._run(
+                ["list files", EOFError()], [_sse_answer("ls -la")], mode="execute"
+            )
+        confirmed.assert_called_once_with("ls -la", "list files")
+        one_shot.assert_not_called()
+
+    def test_resumed_session_shows_recent_messages(self, isolated_db, capsys):
+        session = quipcli.db._Session(
+            "abc123",
+            "old",
+            [{"role": "user", "content": "q1"}, {"role": "assistant", "content": "a1"}],
+        )
+        self._run([EOFError()], [], session=session)
+        out = capsys.readouterr().out
+        assert "› q1" in out and "a1" in out
+
+    def test_needs_a_terminal(self, capsys):
+        with (
+            patch("sys.stdin.isatty", return_value=False),
+            pytest.raises(SystemExit),
+        ):
+            quipcli.run_interactive(
+                quipcli.TurnOptions(model="m"), quipcli.db._fresh_session()
+            )
+        assert "needs a terminal" in capsys.readouterr().err
+
+    def test_completer(self):
+        from prompt_toolkit.document import Document
+
+        from quipcli.interactive import _Completer
+
+        def complete(text):
+            return [
+                c.text
+                for c in _Completer().get_completions(Document(text), MagicMock())
+            ]
+
+        assert "/model" in complete("/mo")
+        assert complete("/reasoning lo") == ["low"]
+        assert complete("/mode ex") == ["exec"]
+        assert complete("plain text") == []
+
+    def test_mode_and_attach_commands(self, tmp_path, capsys):
+        from quipcli.interactive import _command, _State
+
+        state = _State(quipcli.TurnOptions(model="m"), quipcli.db._fresh_session())
+        f = tmp_path / "a.png"
+        f.write_bytes(b"x")
+        assert _command(state, "/mode agent")
+        assert _command(state, f"/attach {f} {tmp_path / 'missing'}")
+        assert state.opts.mode == "agent"
+        assert state.attachments == [str(f)]
+        assert "Not a file" in capsys.readouterr().out
+        assert _command(state, "/exit") is False
+
+
+class TestInteractiveRouting:
+    def _main(self, monkeypatch, argv, stdin_tty=True):
+        monkeypatch.setattr(sys, "argv", ["qp", *argv])
+        with (
+            patch("subprocess.Popen"),
+            patch("sys.stdin.isatty", return_value=stdin_tty),
+            patch("quipcli.interactive.run_interactive") as run,
+        ):
+            quipcli.main()
+        return run
+
+    def test_bare_qp_on_terminal_opens_interactive(self, isolated_db, monkeypatch):
+        run = self._main(monkeypatch, [])
+        opts, session = run.call_args[0]
+        assert session.is_new and session.name is None and opts.mode == "chat"
+
+    def test_t_with_words_names_the_session(self, isolated_db, monkeypatch):
+        run = self._main(monkeypatch, ["-t", "-e", "my", "project"])
+        opts, session = run.call_args[0]
+        assert session.name == "my-project" and opts.mode == "execute"
+
+    def test_words_without_t_are_a_prompt(self, isolated_db, monkeypatch):
+        with patch("quipcli.entry.run_turn") as turn:
+            run = self._main(monkeypatch, ["hello"])
+        run.assert_not_called()
+        assert turn.call_args[0][2] == "hello"
+
+
+class TestSessionsPicker:
+    def _seed(self):
+        for prompt, answer in (("fix wifi driver", "use iwd"), ("latin cat", "felis")):
+            s = quipcli.db._fresh_session()
+            quipcli._save_session(s, prompt)
+            quipcli._record_message(s.id, "user", prompt, None, None, "chat")
+            quipcli._record_message(s.id, "assistant", answer, "m", None, "chat")
+
+    def test_search_matches_message_contents(self, isolated_db):
+        self._seed()
+        assert [r["name"] for r in quipcli._list_sessions(query="IWD")] == [
+            "fix-wifi-driver"
+        ]
+        assert [r["name"] for r in quipcli._list_sessions(query="felis cat")] == [
+            "latin-cat"
+        ]
+        assert quipcli._list_sessions(query="100%") == []
+
+    def test_preview_shows_highlighted_hits(self, isolated_db, capsys):
+        self._seed()
+        sid = quipcli._list_sessions(query="iwd")[0]["id"]
+        quipcli.tui._print_session_preview(sid, "iwd")
+        out = capsys.readouterr().out
+        assert "1 hit(s)" in out
+        assert "\033[1;33miwd\033[0m" in out
+
+    def test_snippets_merge_overlapping_hits(self):
+        text = "alpha beta alpha " + "x" * 200 + " alpha"
+        snippets = quipcli.tui._snippets(text, ["alpha"], context=10)
+        assert len(snippets) == 2 and snippets[1].startswith("…")
+
+    def _pick(self, monkeypatch, stdout):
+        monkeypatch.setattr(sys, "argv", ["qp", "-S", "-t"])
+        with (
+            patch("subprocess.Popen"),
+            patch("quipcli.tui._fzf_available", return_value=True),
+            patch("quipcli.tui.subprocess.run") as run,
+            patch("quipcli.interactive.run_interactive") as interactive,
+            patch("sys.stdin.isatty", return_value=True),
+        ):
+            run.return_value.stdout = stdout
+            quipcli.main()
+        return run, interactive
+
+    def test_enter_makes_session_current(self, isolated_db, monkeypatch, capsys):
+        self._seed()
+        older = quipcli._list_sessions()[1]
+        run, interactive = self._pick(
+            monkeypatch, f"\n{older['id']}  {older['name']}\n"
+        )
+        assert quipcli._current_session_id() == older["id"]
+        interactive.assert_not_called()
+        assert "Current session: fix-wifi-driver" in capsys.readouterr().out
+        argv = run.call_args[0][0]
+        assert "--disabled" in argv and "--expect=alt-enter" in argv
+
+    def test_alt_enter_opens_it_interactively(self, isolated_db, monkeypatch):
+        self._seed()
+        older = quipcli._list_sessions()[1]
+        _, interactive = self._pick(monkeypatch, f"alt-enter\n{older['id']}  x\n")
+        _, session = interactive.call_args[0]
+        assert session.id == older["id"] and len(session.messages) == 2
+
+    def test_escape_does_nothing(self, isolated_db, monkeypatch):
+        self._seed()
+        current = quipcli._current_session_id()
+        _, interactive = self._pick(monkeypatch, "")
+        interactive.assert_not_called()
+        assert quipcli._current_session_id() == current
+
+
+class TestRunConfirmed:
+    def test_returns_status_or_none(self):
+        with (
+            patch("quipcli.execute._ask", return_value="y"),
+            patch("subprocess.run") as run,
+        ):
+            run.return_value.returncode = 3
+            assert quipcli.execute.run_confirmed("false", "p") == 3
+        with patch("quipcli.execute._ask", return_value="n"):
+            assert quipcli.execute.run_confirmed("ls", "p") is None
+        assert quipcli.execute.run_confirmed("", "p") is None

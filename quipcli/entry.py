@@ -1,11 +1,9 @@
 import os
 import shutil
 import sys
-import time
 
 from . import constants
-from .agent import run_agent_loop
-from .cli import _print_stats, build_parser, get_content
+from .cli import build_parser, get_content
 from .config import (
     _ensure_config,
     _load_config,
@@ -16,16 +14,13 @@ from .config import (
 )
 from .context import _machine_context
 from .db import (
+    _age,
     _current_session_id,
     _list_sessions,
-    _record_message,
-    _record_usage,
     _resolve_session,
-    _save_session,
     _session_info,
+    _set_current_session,
 )
-from .execute import confirm_and_run
-from .http_client import call_llm_streaming
 from .models import (
     _check_modality_support,
     _check_reasoning_support,
@@ -36,22 +31,15 @@ from .models import (
     _maybe_update_models_bg,
     _resolve_model_name,
 )
-
-# Fallbacks used when a mode's config key is missing/blank — see _mode_prompt.
-_MODE_PROMPT_DEFAULTS = {
-    "chat": constants.DEFAULT_CHAT_SYSTEM_PROMPT,
-    "execute": constants.DEFAULT_EXECUTE_SYSTEM_PROMPT,
-    "code": constants.CODE_SYSTEM_PROMPT,
-    "agent": constants.DEFAULT_AGENT_SYSTEM_PROMPT,
-}
-
-
-def _mode_prompt(cfg: dict, mode: str) -> str:
-    template = cfg.get(f"{mode}_system_prompt") or _MODE_PROMPT_DEFAULTS[mode]
-    if "{shell}" in template:
-        shell = os.path.basename(os.environ.get("SHELL", "/bin/bash"))
-        template = template.replace("{shell}", shell)
-    return template
+from .turn import (
+    _MODE_PROMPT_DEFAULTS,
+    TurnOptions,
+    _history_limit,
+    _mode_from_flags,
+    _prompt_text,
+    _reasoning_extra,
+    run_turn,
+)
 
 
 def _color_enabled() -> bool:
@@ -164,14 +152,6 @@ def _do_status() -> None:
     )
 
 
-def _age(ts: float) -> str:
-    secs = max(0, int(time.time() - ts))
-    for unit, size in (("d", 86400), ("h", 3600), ("m", 60)):
-        if secs >= size:
-            return f"{secs // size}{unit}"
-    return f"{secs}s"
-
-
 def _do_sessions() -> None:
     sessions = _list_sessions()
     if not sessions:
@@ -223,11 +203,6 @@ def _do_cost(period: str) -> None:
         f"Tokens      : {total_tok:,}  (prompt: {s['prompt_tokens']:,} / completion: {s['completion_tokens']:,})"
     )
     print(f"Cost        : {cost_str}")
-
-
-def _reasoning_extra(cli_effort: str | None, cfg: dict) -> dict | None:
-    effort = cli_effort or cfg.get("reasoning_effort")
-    return {"reasoning": {"effort": effort}} if effort else None
 
 
 def main() -> None:
@@ -297,6 +272,18 @@ def _main() -> None:
         print("\n".join(_model_lines()))
         return
 
+    if args.tui_session_lines is not None:
+        from .tui import _session_lines
+
+        print("\n".join(_session_lines(args.tui_session_lines)))
+        return
+
+    if args.tui_session_preview is not None:
+        from .tui import _print_session_preview
+
+        _print_session_preview(*args.tui_session_preview)
+        return
+
     if args.tui_config_lines:
         from .tui import _config_lines
 
@@ -346,14 +333,34 @@ def _main() -> None:
         return
 
     if args.config_edit:
-        _do_config_edit()
+        if args.tui:
+            from .tui import _config_view, _require_fzf
+
+            _require_fzf()
+            _config_view()
+        else:
+            _do_config_edit()
         return
 
     if args.status:
         _do_status()
         return
 
-    if args.sessions:
+    if args.sessions and args.tui:
+        from .tui import sessions_view
+
+        picked = sessions_view()
+        if picked is None:
+            return
+        key, sid = picked
+        if key != "alt-enter":
+            _set_current_session(sid)
+            info = _session_info(sid)
+            name = info[0] if info else sid
+            print(f"Current session: {name} ({sid}) — continue with: qp -f …")
+            return
+        args.session, args.words = sid, []  # alt-enter: open it interactively
+    elif args.sessions:
         _do_sessions()
         return
 
@@ -361,128 +368,42 @@ def _main() -> None:
         _do_cost(args.cost)
         return
 
-    if args.tui:
-        from .tui import run_tui
-
-        run_tui()
-        return
-
     resolved_model = _resolve_model_name(args.model)
     if resolved_model != args.model and not args.quiet:
         print(f"\033[2mModel: {resolved_model}\033[0m", file=sys.stderr)
     args.model = resolved_model
 
-    history_limit = _load_config().get("session_history", constants.SESSION_HISTORY)
-    session = _resolve_session(
-        args.session,
-        args.follow_up,
-        args.quiet,
-        history_limit=history_limit if isinstance(history_limit, int) else None,
-    )
-    ctx_messages = session.messages
-    user_content, detected_mods = get_content(args)
-
-    # Prompt text for display / execute mode system prompt
-    if isinstance(user_content, str):
-        prompt_text = user_content
-    else:
-        prompt_text = " ".join(
-            p["text"]
-            for p in user_content
-            if isinstance(p, dict) and p.get("type") == "text"
-        )
-
-    _check_modality_support(args.model, detected_mods)
-
-    show_stats = not args.quiet and sys.stdout.isatty()
-    extra = _reasoning_extra(args.reasoning, _load_config())
+    cfg = _load_config()
+    extra = _reasoning_extra(args.reasoning, cfg)
     if extra:
         _check_reasoning_support(args.model, extra["reasoning"]["effort"])
+    opts = TurnOptions(
+        model=args.model,
+        mode=_mode_from_flags(args.execute, args.code, args.agent),
+        reasoning=args.reasoning,
+        system=args.system,
+        max_steps=args.max_steps,
+        web=not args.no_web,
+        quiet=args.quiet,
+        show_stats=not args.quiet and sys.stdout.isatty(),
+    )
 
-    def _default_system(mode: str) -> str | None:
-        cfg = _load_config()
-        parts = [
-            p
-            for p in (
-                _mode_prompt(cfg, mode),
-                _machine_context(),
-                cfg.get("system_prompt"),
-            )
-            if p
-        ]
-        return "\n\n".join(parts) if parts else None
+    # `qp -t [name]`, or a bare `qp` / `qp -f` / `qp -e` on a terminal with
+    # nothing to send: interactive session. With -t, words name the session.
+    no_prompt = not args.words and not args.input and sys.stdin.isatty()
+    if args.tui or no_prompt:
+        session_ref = args.session or ("-".join(args.words) if args.words else None)
+        session = _resolve_session(
+            session_ref, args.follow_up, args.quiet, history_limit=_history_limit(cfg)
+        )
+        from .interactive import run_interactive
 
-    def _build_messages(system: str | None) -> list[dict]:
-        msgs = []
-        if system:
-            msgs.append({"role": "system", "content": system})
-        msgs.extend(ctx_messages)
-        msgs.append({"role": "user", "content": user_content})
-        return msgs
+        run_interactive(opts, session)
+        return
 
-    def _post(response_text: str, stats, mode: str) -> None:
-        if stats:
-            _record_usage(stats, mode)
-        _save_session(session, prompt_text)
-        if show_stats:
-            _print_stats(stats, session.name)
-        _record_message(session.id, "user", user_content, None, None, mode)
-        _record_message(
-            session.id,
-            "assistant",
-            response_text,
-            stats.model if stats else args.model,
-            stats,
-            mode,
-        )
-
-    if args.execute:
-        msgs = _build_messages(args.system or _default_system("execute"))
-        # Streamed (not captured) so a reasoning model shows its thinking
-        # instead of sitting silent; the command itself is only shown in
-        # confirm_and_run's prompt.
-        cmd, stats = call_llm_streaming(
-            msgs,
-            args.model,
-            collect_usage=True,
-            render_markdown=False,
-            show_reasoning=not args.quiet,
-            extra=extra,
-            echo=False,
-        )
-        cmd = cmd.strip()
-        _post(cmd, stats, "execute")
-        confirm_and_run(cmd, prompt_text)
-    elif args.agent:
-        msgs = _build_messages(args.system or _default_system("agent"))
-        text, stats = run_agent_loop(
-            msgs,
-            args.model,
-            max_steps=args.max_steps,
-            server_tools=not args.no_web,
-            extra=extra,
-            show_progress=not args.quiet,
-        )
-        _post(text, stats, "agent")
-    elif args.code:
-        msgs = _build_messages(args.system or _default_system("code"))
-        text, stats = call_llm_streaming(
-            msgs,
-            args.model,
-            collect_usage=True,
-            render_markdown=False,
-            show_reasoning=not args.quiet,
-            extra=extra,
-        )
-        _post(text, stats, "code")
-    else:
-        msgs = _build_messages(args.system or _default_system("chat"))
-        text, stats = call_llm_streaming(
-            msgs,
-            args.model,
-            collect_usage=True,
-            render_markdown=True,
-            show_reasoning=not args.quiet,
-            extra=extra,
-        )
-        _post(text, stats, "chat")
+    session = _resolve_session(
+        args.session, args.follow_up, args.quiet, history_limit=_history_limit(cfg)
+    )
+    user_content, detected_mods = get_content(args)
+    _check_modality_support(args.model, detected_mods)
+    run_turn(opts, session, user_content, _prompt_text(user_content))

@@ -72,7 +72,7 @@ from .tui import (
     _print_model_info,
     _run_fzf,
     pick_model_interactive,
-    run_tui,
+    sessions_view,
 )
 from .entry import (
     _do_config_edit,
@@ -80,7 +80,9 @@ from .entry import (
     _do_model_get,
     _do_model_set,
     _do_models,
+    _do_sessions,
     _do_status,
-    _mode_prompt,
     main,
 )
+from .turn import TurnOptions, _mode_prompt, _reasoning_extra, run_turn
+from .interactive import run_interactive

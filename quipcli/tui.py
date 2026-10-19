@@ -1,3 +1,4 @@
+import json
 import os
 import re
 import shlex
@@ -8,6 +9,14 @@ import textwrap
 
 from . import constants
 from .config import _load_config, _resolve_default_model, _save_config
+from .db import (
+    _age,
+    _current_session_id,
+    _get_session_messages,
+    _list_sessions,
+    _session_info,
+    _text_of,
+)
 from .execute import _edit_text_value
 from .http_client import _ollama_models
 from .models import _load_models, _load_models_full, _ranking_for
@@ -300,23 +309,143 @@ def _config_view() -> None:
             _save_config(cfg)
 
 
-def run_tui() -> None:
+def _require_fzf() -> None:
     if not _fzf_available():
         print(
-            "Error: --tui requires fzf (https://github.com/junegunn/fzf).",
+            "Error: -t pickers require fzf (https://github.com/junegunn/fzf).",
             file=sys.stderr,
         )
         sys.exit(1)
-    while True:
-        choice = _run_fzf(
-            ["Models", "Config"],
-            header="enter  open   esc  quit",
-            prompt="quip> ",
-            border_label="qp",
+
+
+# ── Sessions picker (qp -S -t) ────────────────────────────────────────────────
+# The list is re-queried from SQLite on every keystroke (fzf --disabled +
+# change:reload), so the query searches message *contents*, not just the
+# visible line; the preview shows where each term hits in that session.
+
+_HIT = "\033[1;33m"
+_DIM = "\033[2m"
+_RESET = "\033[0m"
+
+
+def _session_lines(query: str = "") -> list[str]:
+    rows = _list_sessions(limit=500, query=query)
+    if not rows:
+        return []
+    name_w = min(28, max(len(r["name"]) for r in rows))
+    current = _current_session_id()
+    lines = []
+    for r in rows:
+        prompt = " ".join(r["first_prompt"].split())[:120]
+        line = (
+            f"{r['id']}  {r['name'][:name_w]:{name_w}}  {_age(r['updated']):>4}"
+            f"  {r['messages']:>3}  {prompt}"
         )
-        if choice is None:
-            return
-        if choice == "Models":
-            _models_view(picker_mode=False)
-        elif choice == "Config":
-            _config_view()
+        lines.append(f"\033[32m{line}{_RESET}" if r["id"] == current else line)
+    return lines
+
+
+def _highlight(text: str, terms: list[str]) -> str:
+    if not terms:
+        return text
+    pattern = re.compile("|".join(re.escape(t) for t in terms), re.IGNORECASE)
+    return pattern.sub(lambda m: f"{_HIT}{m.group(0)}{_RESET}", text)
+
+
+def _snippets(text: str, terms: list[str], context: int = 60) -> list[str]:
+    """One context window per hit, merged when they overlap."""
+    lowered = text.lower()
+    spans: list[list[int]] = []
+    for term in terms:
+        start = 0
+        while (pos := lowered.find(term.lower(), start)) != -1:
+            spans.append([max(0, pos - context), pos + len(term) + context])
+            start = pos + len(term)
+    spans.sort()
+    merged: list[list[int]] = []
+    for span in spans:
+        if merged and span[0] <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], span[1])
+        else:
+            merged.append(span)
+    out = []
+    for a, b in merged:
+        snippet = " ".join(text[a:b].split())
+        out.append(("…" if a else "") + snippet + ("…" if b < len(text) else ""))
+    return out
+
+
+def _message_text(content: str | list) -> str:
+    return _text_of(json.dumps(content)) if isinstance(content, list) else content
+
+
+def _print_session_preview(session_id: str, query: str = "") -> None:
+    """Handler for the hidden --_tui-session-preview flag."""
+    info = _session_info(session_id)
+    if info is None:
+        return
+    name, count = info
+    print(f"\033[1m{name}\033[0m {_DIM}({session_id}) · {count} messages{_RESET}")
+    print()
+    terms = query.split()
+    messages = [
+        (m["role"], _message_text(m["content"]))
+        for m in _get_session_messages(session_id)
+    ]
+    if terms:
+        hits = 0
+        for role, text in messages:
+            for snippet in _snippets(text, terms):
+                hits += 1
+                print(f"{_DIM}{role}:{_RESET} {_highlight(snippet, terms)}")
+        if hits == 0:
+            print(f"{_DIM}(match in the session name only){_RESET}")
+        print(f"\n{_DIM}── {hits} hit(s) ──{_RESET}\n")
+    width = 70
+    try:
+        width = max(20, int(os.environ.get("FZF_PREVIEW_COLUMNS", width)))
+    except ValueError:
+        pass
+    for role, text in messages[-20:]:
+        label = "you" if role == "user" else role
+        body = text if len(text) <= 600 else text[:600] + "…"
+        print(f"{_DIM}{label}:{_RESET}")
+        print(_highlight(textwrap.fill(" ".join(body.split()), width=width), terms))
+        print()
+
+
+def sessions_view() -> tuple[str, str] | None:
+    """fzf session picker → (key, session_id), key "enter" or "alt-enter";
+    None when cancelled."""
+    _require_fzf()
+    lines = _session_lines()
+    if not lines:
+        print("No sessions yet.", file=sys.stderr)
+        return None
+    args = [
+        "fzf",
+        *_FZF_LAYOUT,
+        *_FZF_COLORS,
+        "--ansi",
+        "--disabled",
+        "--expect=alt-enter",
+        "--border-label= qp · sessions ",
+        (
+            "--header=enter  make current (qp -f)   alt-enter  open interactively"
+            "   esc  quit"
+        ),
+        "--prompt=search> ",
+        f"--preview={_SELF} --_tui-session-preview {{1}} {{q}}",
+        f"--bind=change:reload({_SELF} --_tui-session-lines {{q}})",
+    ]
+    try:
+        result = subprocess.run(
+            args, input="\n".join(lines), capture_output=True, text=True, check=False
+        )
+    except OSError:
+        return None
+    key, _, line = result.stdout.rstrip("\n").partition("\n")
+    line = _strip_ansi(line).strip()
+    if not line:
+        return None
+    return ("alt-enter" if key == "alt-enter" else "enter"), line.split()[0]
