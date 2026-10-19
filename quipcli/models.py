@@ -8,6 +8,15 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from . import constants
+from .http_client import _open_connection, _request_target
+
+# Minimum gap between background refresh attempts, so a failing fetch (offline,
+# bad key) doesn't respawn a Python process on every single `qp` call.
+_REFRESH_RETRY = 3600
+
+
+def _refresh_stamp() -> Path:
+    return constants._MODELS_CACHE.with_name("models.attempt")
 
 
 def _models_url() -> str:
@@ -45,6 +54,17 @@ def _maybe_update_models_bg() -> None:
             return  # cache is fresh enough
     except FileNotFoundError:
         pass
+    stamp = _refresh_stamp()
+    try:
+        if time.time() - stamp.stat().st_mtime < _REFRESH_RETRY:
+            return  # a refresh was attempted recently (and evidently failed)
+    except FileNotFoundError:
+        pass
+    try:
+        stamp.parent.mkdir(parents=True, exist_ok=True)
+        stamp.touch()
+    except OSError:
+        pass
     pkg_parent = str(Path(__file__).parent.parent)
     subprocess.Popen(
         [
@@ -67,15 +87,12 @@ def _fetch_models() -> list[str]:
     """Fetch model list from provider, save to cache, return sorted IDs."""
     url = _models_url()
     parsed = urlparse(url)
-    conn = http.client.HTTPSConnection(
-        parsed.netloc, context=constants._SSL_CTX, timeout=30
+    headers = (
+        {"Authorization": f"Bearer {constants._API_KEY}"} if constants._API_KEY else {}
     )
     try:
-        conn.request(
-            "GET",
-            parsed.path,
-            headers={"Authorization": f"Bearer {constants._API_KEY}"},
-        )
+        conn = _open_connection(parsed)
+        conn.request("GET", _request_target(parsed), headers=headers)
         resp = conn.getresponse()
     except OSError as e:
         print(f"Error: connection failed: {e}", file=sys.stderr)

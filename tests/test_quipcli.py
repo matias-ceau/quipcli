@@ -13,7 +13,6 @@ import pytest
 import quipcli
 from quipcli import (
     _build_user_content,
-    _execute_prompt,
     _is_image_url,
     _load_models,
     _maybe_update_models_bg,
@@ -31,11 +30,21 @@ from quipcli import (
 class MockHTTPResponse:
     """Minimal http.client.HTTPResponse stand-in."""
 
-    def __init__(self, status: int, body: bytes, sse_lines: list[bytes] | None = None):
+    def __init__(
+        self,
+        status: int,
+        body: bytes,
+        sse_lines: list[bytes] | None = None,
+        headers: dict[str, str] | None = None,
+    ):
         self.status = status
         self._body = body
         self._lines = sse_lines or []
         self._idx = 0
+        self._headers = headers or {}
+
+    def getheader(self, name: str, default: str | None = None) -> str | None:
+        return self._headers.get(name, default)
 
     def read(self) -> bytes:
         return self._body
@@ -370,25 +379,6 @@ class TestGetContent:
         assert mods == {"image"}
         assert isinstance(content, list)
         assert content[0] == {"type": "text", "text": "describe\n\nextra context"}
-
-
-# ── _execute_prompt ───────────────────────────────────────────────────────────
-
-
-class TestExecutePrompt:
-    def test_includes_shell_name(self, monkeypatch):
-        monkeypatch.setenv("SHELL", "/bin/zsh")
-        assert "zsh" in _execute_prompt()
-
-    def test_fallback_to_bash(self, monkeypatch):
-        monkeypatch.delenv("SHELL", raising=False)
-        assert "bash" in _execute_prompt()
-
-    def test_no_markdown_instruction(self, monkeypatch):
-        monkeypatch.setenv("SHELL", "/bin/bash")
-        prompt = _execute_prompt()
-        assert "No markdown" in prompt
-        assert "No code fences" in prompt
 
 
 class TestPrintStats:
@@ -1224,56 +1214,6 @@ class TestMarkdownAnsiRenderer:
         assert r._in_fenced_code is False
 
 
-class TestCallLlmCapture:
-    def _msgs(self):
-        return [{"role": "user", "content": "p"}]
-
-    def test_returns_stripped_content(self, mock_http):
-        body = json.dumps(
-            {"choices": [{"message": {"content": "  result  "}}]}
-        ).encode()
-        mock_http(MockHTTPResponse(200, body))
-        text, stats = quipcli.call_llm_capture(self._msgs(), "m")
-        assert text == "result"
-        assert stats is None
-
-    def test_returns_usage_stats(self, mock_http):
-        body = json.dumps(
-            {
-                "choices": [{"message": {"content": "hi"}}],
-                "usage": {"prompt_tokens": 10, "completion_tokens": 20, "cost": 0.0003},
-            }
-        ).encode()
-        mock_http(MockHTTPResponse(200, body))
-        text, stats = quipcli.call_llm_capture(self._msgs(), "m")
-        assert text == "hi"
-        assert stats is not None
-        assert stats.prompt_tokens == 10
-        assert stats.completion_tokens == 20
-        assert stats.cost_usd == pytest.approx(0.0003)
-
-    def test_error_payload_with_http_200_exits(self, mock_http, capsys):
-        body = json.dumps({"error": {"message": "boom"}}).encode()
-        mock_http(MockHTTPResponse(200, body))
-        with pytest.raises(SystemExit) as exc:
-            quipcli.call_llm_capture(self._msgs(), "m")
-        assert exc.value.code == 1
-        assert "boom" in capsys.readouterr().err
-
-    def test_empty_choices_exits(self, mock_http, capsys):
-        mock_http(MockHTTPResponse(200, json.dumps({"choices": []}).encode()))
-        with pytest.raises(SystemExit) as exc:
-            quipcli.call_llm_capture(self._msgs(), "m")
-        assert exc.value.code == 1
-
-    def test_invalid_json_exits(self, mock_http, capsys):
-        mock_http(MockHTTPResponse(200, b"<html>gateway error</html>"))
-        with pytest.raises(SystemExit) as exc:
-            quipcli.call_llm_capture(self._msgs(), "m")
-        assert exc.value.code == 1
-        assert "unexpected API response" in capsys.readouterr().err
-
-
 # ── _make_request extra param ────────────────────────────────────────────────
 
 
@@ -1511,7 +1451,7 @@ class TestAgentLoop:
         exec_tool.assert_not_called()
         assert text == "grounded answer"
 
-    def test_max_steps_reached_returns_last_content(self, capsys):
+    def test_max_steps_reached_asks_for_final_answer(self, capsys):
         looping_resp = self._response(
             {
                 "role": "assistant",
@@ -1525,18 +1465,41 @@ class TestAgentLoop:
                 ],
             }
         )
+        final_resp = self._response({"role": "assistant", "content": "summary"})
         with (
             patch("http.client.HTTPSConnection") as cls,
             patch("quipcli.constants._API_KEY", "key"),
             patch("quipcli.agent.execute_tool_call", return_value="ok"),
         ):
-            cls.return_value = _mock_conn(looping_resp)
-            _text, stats = quipcli.run_agent_loop(
+            conns = [_mock_conn(looping_resp) for _ in range(3)]
+            conns.append(_mock_conn(final_resp))
+            cls.side_effect = conns
+            text, stats = quipcli.run_agent_loop(
                 self._msgs(), "m", max_steps=3, render_markdown=False
             )
-        assert cls.call_count == 3
+        assert cls.call_count == 4
+        _, _, body_arg, _ = conns[-1].request.call_args[0]
+        assert json.loads(body_arg)["tool_choice"] == "none"
+        # The wrap-up reply is the answer — never the last raw tool output.
+        assert text == "summary"
         assert "max steps" in capsys.readouterr().err
         assert stats is not None
+
+    def test_server_tools_dropped_for_non_openrouter_provider(self, capsys):
+        body = json.dumps({"choices": [{"message": {"content": "ok"}}]}).encode()
+        with (
+            patch("http.client.HTTPSConnection") as cls,
+            patch("quipcli.constants._API_KEY", "key"),
+            patch(
+                "quipcli.constants._API_URL",
+                "https://api.example.com/v1/chat/completions",
+            ),
+        ):
+            cls.return_value = _mock_conn(MockHTTPResponse(200, body))
+            quipcli.run_agent_loop(self._msgs(), "m", render_markdown=False)
+        _, _, body_arg, _ = cls.return_value.request.call_args[0]
+        sent_types = {t["type"] for t in json.loads(body_arg)["tools"]}
+        assert sent_types == {"function"}
 
     def test_no_web_excludes_server_tools_from_request(self, mock_http):
         body = json.dumps({"choices": [{"message": {"content": "ok"}}]}).encode()
@@ -1615,15 +1578,6 @@ class TestReasoning:
         _, _, body_arg, _ = http_cls.return_value.request.call_args[0]
         assert json.loads(body_arg)["reasoning"] == {"effort": "low"}
 
-    def test_capture_sends_reasoning_extra(self, mock_http):
-        body = json.dumps({"choices": [{"message": {"content": "ls"}}]}).encode()
-        http_cls = mock_http(MockHTTPResponse(200, body))
-        quipcli.call_llm_capture(
-            self._msgs(), "m", extra={"reasoning": {"effort": "low"}}
-        )
-        _, _, body_arg, _ = http_cls.return_value.request.call_args[0]
-        assert json.loads(body_arg)["reasoning"] == {"effort": "low"}
-
     def _reasoning_lines(self):
         return [
             b'data: {"choices":[{"delta":{"content":"","reasoning":"thinking hard"}}]}\n',
@@ -1691,6 +1645,235 @@ class TestCheckReasoningSupport:
     def test_cache_miss_is_silent(self, tmp_path, capsys):
         self._run(tmp_path, {"supported_efforts": ["low"]}, "high", model="other")
         assert capsys.readouterr().err == ""
+
+
+class TestReviewFixes:
+    """Regression tests for the dev/review-polish fixes."""
+
+    def _msgs(self):
+        return [{"role": "user", "content": "hi"}]
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            "```zsh\nls -la\n```",
+            "```shell\nls -la\n```",
+            "```console\nls -la\n```",
+            "$ ls -la",
+        ],
+    )
+    def test_strip_fences_any_info_string(self, raw):
+        assert _strip_fences(raw) == "ls -la"
+
+    def test_empty_command_is_not_run(self, capsys):
+        with patch("subprocess.run") as run, pytest.raises(SystemExit) as exc:
+            quipcli.confirm_and_run("```\n```", "p")
+        assert exc.value.code == 1
+        run.assert_not_called()
+        assert "no command" in capsys.readouterr().err
+
+    def test_confirm_prompt_goes_to_stderr(self, capsys):
+        with patch("builtins.input", return_value="n"), pytest.raises(SystemExit):
+            quipcli.confirm_and_run("ls", "p")
+        captured = capsys.readouterr()
+        assert "Run this command?" in captured.err
+        assert "Run this command?" not in captured.out
+
+    def test_stream_error_chunk_is_reported(self, mock_http, capsys):
+        lines = [
+            b'data: {"error":{"message":"provider overloaded"},"choices":[{"delta":{},"finish_reason":"error"}]}\n',
+            b"data: [DONE]\n",
+        ]
+        mock_http(MockHTTPResponse(200, b"", lines))
+        quipcli.call_llm_streaming(self._msgs(), "m")
+        assert "provider overloaded" in capsys.readouterr().err
+
+    def test_empty_stream_warns(self, mock_http, capsys):
+        lines = [
+            b'data: {"choices":[{"delta":{"content":""},"finish_reason":"length"}]}\n',
+            b"data: [DONE]\n",
+        ]
+        mock_http(MockHTTPResponse(200, b"", lines))
+        quipcli.call_llm_streaming(self._msgs(), "m")
+        err = capsys.readouterr().err
+        assert "no content" in err
+        assert "length" in err
+
+    def test_reasoning_content_field_shown(self, mock_http, capsys):
+        lines = [
+            b'data: {"choices":[{"delta":{"reasoning_content":"pondering"}}]}\n',
+            b'data: {"choices":[{"delta":{"content":"ok"}}]}\n',
+            b"data: [DONE]\n",
+        ]
+        mock_http(MockHTTPResponse(200, b"", lines))
+        with patch("sys.stderr.isatty", return_value=True):
+            quipcli.call_llm_streaming(self._msgs(), "m", show_reasoning=True)
+        assert "pondering" in capsys.readouterr().err
+
+    def test_echo_false_collects_without_printing(self, mock_http, capsys):
+        lines = [
+            b'data: {"choices":[{"delta":{"content":"ls -la"}}]}\n',
+            b"data: [DONE]\n",
+        ]
+        mock_http(MockHTTPResponse(200, b"", lines))
+        text, _ = quipcli.call_llm_streaming(self._msgs(), "m", echo=False)
+        assert text == "ls -la"
+        assert capsys.readouterr().out == ""
+
+    def test_query_string_kept_in_request_target(self, mock_http):
+        body = json.dumps({"choices": [{"message": {"content": "ok"}}]}).encode()
+        http_cls = mock_http(MockHTTPResponse(200, body))
+        with patch(
+            "quipcli.constants._API_URL",
+            "https://x.example/openai/chat/completions?api-version=2024-10-21",
+        ):
+            quipcli._make_request(self._msgs(), "m", False)
+        _, target, _, _ = http_cls.return_value.request.call_args[0]
+        assert target == "/openai/chat/completions?api-version=2024-10-21"
+
+    def test_retry_after_header_honoured_and_capped(self):
+        with (
+            patch("http.client.HTTPSConnection") as cls,
+            patch("quipcli.constants._API_KEY", "key"),
+            patch("quipcli.http_client.time.sleep") as sleep,
+        ):
+            cls.side_effect = [
+                _mock_conn(
+                    MockHTTPResponse(429, b"slow", headers={"Retry-After": "7"})
+                ),
+                _mock_conn(
+                    MockHTTPResponse(429, b"slow", headers={"Retry-After": "999"})
+                ),
+                _mock_conn(MockHTTPResponse(200, b"ok")),
+            ]
+            quipcli._make_request(self._msgs(), "m", False)
+        assert [c.args[0] for c in sleep.call_args_list] == [7, 30]
+
+    def test_ollama_fallback_strips_openrouter_server_tools(self, capsys):
+        ok = MockHTTPResponse(200, b"ok")
+        tags = MockHTTPResponse(
+            200, json.dumps({"models": [{"name": "llama3.2"}]}).encode()
+        )
+        with (
+            patch("http.client.HTTPConnection") as http_cls,
+            patch("quipcli.constants._API_KEY", ""),
+        ):
+            post_conn = _mock_conn(ok)
+            http_cls.side_effect = [_mock_conn(tags), post_conn]
+            quipcli._make_request(
+                self._msgs(),
+                "m",
+                False,
+                extra={
+                    "tools": [{"type": "function"}, {"type": "openrouter:web_search"}]
+                },
+            )
+        _, _, body_arg, _ = post_conn.request.call_args[0]
+        assert json.loads(body_arg)["tools"] == [{"type": "function"}]
+
+    def test_fetch_models_over_plain_http_without_key(self, tmp_path):
+        body = json.dumps({"data": [{"id": "llama3"}]}).encode()
+        with (
+            patch("http.client.HTTPConnection") as http_cls,
+            patch("http.client.HTTPSConnection") as https_cls,
+            patch(
+                "quipcli.constants._API_URL",
+                "http://localhost:8080/v1/chat/completions?x=1",
+            ),
+            patch("quipcli.constants._API_KEY", ""),
+            patch("quipcli.constants._MODELS_CACHE", tmp_path / "models.json"),
+            patch("quipcli.constants._CACHE_DIR", tmp_path),
+        ):
+            http_cls.return_value = _mock_conn(MockHTTPResponse(200, body))
+            assert quipcli._fetch_models() == ["llama3"]
+        https_cls.assert_not_called()
+        method, target = http_cls.return_value.request.call_args[0]
+        assert (method, target) == ("GET", "/v1/models")
+        assert http_cls.return_value.request.call_args[1]["headers"] == {}
+
+    def test_bg_refresh_backs_off_after_recent_attempt(self, monkeypatch, tmp_path):
+        monkeypatch.delenv("_LLM_CMD_BG_UPDATE", raising=False)
+        with (
+            patch("subprocess.Popen") as popen,
+            patch("quipcli.constants._MODELS_CACHE", tmp_path / "models.json"),
+        ):
+            _maybe_update_models_bg()  # no cache → spawns + stamps
+            _maybe_update_models_bg()  # fetch evidently failed → backs off
+        popen.assert_called_once()
+        assert (tmp_path / "models.attempt").exists()
+
+    def test_bg_refresh_retries_after_backoff_expires(self, monkeypatch, tmp_path):
+        monkeypatch.delenv("_LLM_CMD_BG_UPDATE", raising=False)
+        stamp = tmp_path / "models.attempt"
+        stamp.touch()
+        old = time.time() - 2 * 3600
+        os.utime(stamp, (old, old))
+        with (
+            patch("subprocess.Popen") as popen,
+            patch("quipcli.constants._MODELS_CACHE", tmp_path / "models.json"),
+        ):
+            _maybe_update_models_bg()
+        popen.assert_called_once()
+
+    def test_db_connection_is_closed(self, tmp_path):
+        with (
+            patch("quipcli.constants._HISTORY_DB", tmp_path / "history.db"),
+            patch("quipcli.constants._DATA_DIR", tmp_path),
+        ):
+            with quipcli.db._db_conn() as conn:
+                conn.execute("SELECT 1")
+            with pytest.raises(sqlite3.ProgrammingError):
+                conn.execute("SELECT 1")
+
+    def test_db_schema_recreated_if_file_removed(self, tmp_path):
+        db = tmp_path / "history.db"
+        with (
+            patch("quipcli.constants._HISTORY_DB", db),
+            patch("quipcli.constants._DATA_DIR", tmp_path),
+        ):
+            quipcli._record_message("s", "user", "a", None, None, "chat")
+            db.unlink()
+            quipcli._record_message("s", "user", "b", None, None, "chat")
+            msgs = quipcli._get_session_messages("s")
+        assert msgs == [{"role": "user", "content": "b"}]
+
+    def test_session_messages_keep_insert_order_on_equal_ts(self, tmp_path):
+        with (
+            patch("quipcli.constants._HISTORY_DB", tmp_path / "history.db"),
+            patch("quipcli.constants._DATA_DIR", tmp_path),
+            patch("quipcli.db.time.time", return_value=1000.0),
+        ):
+            for i in range(5):
+                quipcli._record_message("s", "user", str(i), None, None, "chat")
+            msgs = quipcli._get_session_messages("s")
+        assert [m["content"] for m in msgs] == ["0", "1", "2", "3", "4"]
+
+    def test_model_info_shows_reasoning_efforts(self, tmp_path, capsys):
+        cache = tmp_path / "models.json"
+        cache.write_text(
+            json.dumps(
+                {
+                    "data": [
+                        {
+                            "id": "z/glm",
+                            "reasoning": {
+                                "supported_efforts": ["max", "high", "low"],
+                                "default_effort": "max",
+                                "mandatory": True,
+                            },
+                        }
+                    ]
+                }
+            )
+        )
+        with patch("quipcli.constants._MODELS_CACHE", cache):
+            quipcli.tui._print_model_info("  z/glm")
+        out = capsys.readouterr().out
+        assert "reasoning_efforts: max, high, low (default max; mandatory)" in out
+
+    def test_tui_previews_call_current_interpreter(self):
+        assert quipcli.tui._SELF.startswith(sys.executable)
+        assert quipcli.tui._SELF.endswith(" -m quipcli")
 
 
 class TestMainInterrupt:
@@ -2262,6 +2445,21 @@ class TestBuildUserContent:
         assert isinstance(content, str)
         assert mods == set()
 
+    def test_explicit_text_file_is_inlined(self, tmp_path):
+        log = tmp_path / "app.log"
+        log.write_text("ERROR boom\n")
+        content, mods = _build_user_content(["why", "this", "error"], [str(log)])
+        assert isinstance(content, str)
+        assert content.startswith("why this error\n\napp.log:\n```\nERROR boom\n```")
+        assert mods == set()
+
+    def test_explicit_binary_non_media_file_skipped(self, tmp_path, capsys):
+        blob = tmp_path / "x.bin"
+        blob.write_bytes(b"\xff\xfe\x00\x81")
+        content, _ = _build_user_content(["hi"], [str(blob)])
+        assert content == "hi"
+        assert "skipped" in capsys.readouterr().err
+
     def test_text_only_returns_str(self):
         content, _mods = _build_user_content(["hello", "world"])
         assert isinstance(content, str)
@@ -2291,6 +2489,24 @@ class TestEncodeFileContent:
         part = quipcli._encode_file_content(f)
         assert part["type"] == "file"
         assert part["file"]["filename"] == "doc.pdf"
+        # OpenRouter expects file_data as a data URL, not a bare "data" field
+        assert part["file"]["file_data"].startswith("data:application/pdf;base64,")
+        assert "data" not in part["file"]
+
+    @pytest.mark.parametrize(
+        "name,fmt", [("a.flac", "flac"), ("a.m4a", "m4a"), ("a.aac", "aac")]
+    )
+    def test_extra_audio_formats(self, tmp_path, name, fmt):
+        f = tmp_path / name
+        f.write_bytes(b"\x00")
+        part = quipcli._encode_file_content(f)
+        assert part["input_audio"]["format"] == fmt
+
+    def test_mov_video(self, tmp_path):
+        f = tmp_path / "clip.mov"
+        f.write_bytes(b"\x00")
+        part = quipcli._encode_file_content(f)
+        assert part["video_url"]["url"].startswith("data:video/mov;base64,")
 
     def test_audio_format(self, tmp_path):
         f = tmp_path / "sound.mp3"
@@ -2727,15 +2943,12 @@ class TestMainDispatch:
         assert record_usage.call_args[0][1] == "chat"
         record_message.assert_not_called()  # no -s/-f, so no session_id
 
-    def test_execute_mode_calls_capture_and_confirm(
+    def test_execute_mode_streams_silently_and_confirms(
         self, tmp_path, monkeypatch, capsys
     ):
         self._isolate(tmp_path, monkeypatch)
         monkeypatch.setattr(sys, "argv", ["qp", "-e", "list files"])
-        resp = self._json(
-            {"role": "assistant", "content": "ls -la"},
-            usage={"prompt_tokens": 4, "completion_tokens": 3},
-        )
+        resp = self._sse("ls -la\n", usage={"prompt_tokens": 4, "completion_tokens": 3})
         with (
             patch("subprocess.Popen"),
             patch("http.client.HTTPSConnection") as cls,
@@ -2749,6 +2962,9 @@ class TestMainDispatch:
         assert exc.value.code == 0  # user declined to run the generated command
         record_usage.assert_called_once()
         assert record_usage.call_args[0][1] == "execute"
+        captured = capsys.readouterr()
+        assert captured.out == ""  # command shown only in the confirm prompt
+        assert "ls -la" in captured.err
 
     def test_agent_mode_calls_run_agent_loop_and_records(
         self, tmp_path, monkeypatch, capsys

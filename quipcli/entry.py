@@ -15,7 +15,7 @@ from .config import (
 from .context import _machine_context
 from .db import _record_message, _record_usage, _resolve_session
 from .execute import confirm_and_run
-from .http_client import call_llm_capture, call_llm_streaming
+from .http_client import call_llm_streaming
 from .models import (
     _check_modality_support,
     _check_reasoning_support,
@@ -377,7 +377,19 @@ def _main() -> None:
 
     if args.execute:
         msgs = _build_messages(args.system or _default_system("execute"))
-        cmd, stats = call_llm_capture(msgs, args.model, extra=extra)
+        # Streamed (not captured) so a reasoning model shows its thinking
+        # instead of sitting silent; the command itself is only shown in
+        # confirm_and_run's prompt.
+        cmd, stats = call_llm_streaming(
+            msgs,
+            args.model,
+            collect_usage=True,
+            render_markdown=False,
+            show_reasoning=not args.quiet,
+            extra=extra,
+            echo=False,
+        )
+        cmd = cmd.strip()
         _post(cmd, stats, "execute")
         confirm_and_run(cmd, prompt_text)
     elif args.agent:
@@ -388,6 +400,7 @@ def _main() -> None:
             max_steps=args.max_steps,
             server_tools=not args.no_web,
             extra=extra,
+            show_progress=not args.quiet,
         )
         _post(text, stats, "agent")
     elif args.code:

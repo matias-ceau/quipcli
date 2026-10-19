@@ -49,13 +49,12 @@ from .multimodal import _build_user_content, _encode_file_content, _is_image_url
 from .http_client import (
     _make_request,
     _ollama_models,
-    call_llm_capture,
     call_llm_streaming,
 )
 from .execute import _edit_in_editor, _edit_text_value, _strip_fences, confirm_and_run
 from .tools import default_tools, execute_tool_call, read_file, run_shell, write_file
 from .agent import run_agent_loop
-from .cli import _execute_prompt, _print_stats, build_parser, get_content
+from .cli import _print_stats, build_parser, get_content
 from .tui import (
     _config_lines,
     _config_view,

@@ -5,14 +5,20 @@ import sys
 import tempfile
 from pathlib import Path
 
+from .tools import _ask
+
 
 def _strip_fences(command: str) -> str:
     command = command.strip()
-    for prefix in ("```bash", "```sh", "```"):
-        if command.startswith(prefix):
-            command = command[len(prefix) :]
-            break
-    return command.removesuffix("```").strip()
+    if command.startswith("```"):
+        # Drop the whole opening fence line, whatever its info string
+        # (bash, sh, zsh, shell, console, fish…).
+        _, _, command = command.partition("\n")
+    command = command.strip().removesuffix("```").strip()
+    # A single "$ cmd" prompt-style line is still just cmd.
+    if "\n" not in command and command.startswith("$ "):
+        command = command[2:]
+    return command
 
 
 def _edit_in_editor(command: str, prompt: str) -> str:
@@ -52,9 +58,12 @@ def _edit_text_value(current: str) -> str:
 def confirm_and_run(command: str, prompt: str) -> None:
     command = _strip_fences(command)
     while True:
+        if not command:
+            print("Error: no command to run.", file=sys.stderr)
+            sys.exit(1)
         print(f"\n\033[1;32m$ {command}\033[0m", file=sys.stderr)
         try:
-            choice = input("Run this command? [Y/n/e] ").strip().lower()
+            choice = _ask("Run this command? [Y/n/e] ").strip().lower()
         except EOFError, KeyboardInterrupt:
             print("\nAborted.", file=sys.stderr)
             sys.exit(0)

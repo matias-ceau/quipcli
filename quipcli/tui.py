@@ -48,22 +48,9 @@ _FZF_LAYOUT = [
     "--bind=resize:refresh-preview",
 ]
 
-# TODO(you): these are fzf's *semantic* color slots, not a single "make it
-# pretty" knob — each one lights up a different UI element:
-#   fg/bg      base list text / background
-#   fg+/bg+    the currently-highlighted row
-#   hl/hl+     the substring fzf bolds while you type a query (idle / on
-#              the highlighted row)
-#   pointer    the ▶ cursor glyph on the active row
-#   marker     multi-select marks (unused here, single-select only)
-#   border/label  the box outline + the " qp · ... " title text
-#   header     the dim keybind-hint line pinned under the border
-# Your fzf-file-manager.sh wires this same slot list to $FLEXOKI_* via
-# get_color()/pastel — quipcli can't assume your dotfiles are on the
-# machine it runs on, so the values are inlined here instead. Swap them
-# for whatever palette you actually want (Flexoki, terminal-native `-1`
-# to just inherit your terminal theme, or anything else) — this block is
-# the one place that controls it.
+# fzf semantic color slots (fg/bg = list, fg+/bg+ = highlighted row, hl/hl+ =
+# query matches, pointer = ▶ cursor, border/label = box + title, header = the
+# keybind-hint line). Flexoki palette, inlined so it works without dotfiles.
 _FZF_COLORS = [
     "--color=fg:#878580,fg+:#fffcf0,bg+:#282726",
     "--color=hl:#205ea6,hl+:#24837b",
@@ -116,6 +103,12 @@ def _run_fzf(
     return selected or None
 
 
+# fzf runs preview/reload commands through a shell: call back into *this*
+# interpreter rather than whatever `qp` is first on $PATH (or none, under
+# `uv run python -m quipcli`).
+_SELF = f"{shlex.quote(sys.executable)} -m quipcli"
+
+
 def _model_id_from_line(line: str) -> str:
     line = _strip_ansi(line)
     return line[2:].strip() if len(line) > 2 else line.strip()
@@ -154,6 +147,17 @@ def _print_model_info(line: str) -> None:
         print(f"price_per_1M_completion: {_per_million('completion')}")
         print(f"input_modalities: {', '.join(arch.get('input_modalities', []))}")
         print(f"output_modalities: {', '.join(arch.get('output_modalities', []))}")
+        reasoning = m.get("reasoning")
+        if reasoning:
+            efforts = ", ".join(reasoning.get("supported_efforts") or []) or "n/a"
+            extras = [
+                f"default {reasoning['default_effort']}"
+                if reasoning.get("default_effort")
+                else "",
+                "mandatory" if reasoning.get("mandatory") else "",
+            ]
+            suffix = "; ".join(filter(None, extras))
+            print(f"reasoning_efforts: {efforts}" + (f" ({suffix})" if suffix else ""))
 
         ranking = _ranking_for(m.get("canonical_slug", ""))
         if ranking:
@@ -185,8 +189,10 @@ def _models_view(picker_mode: bool = False) -> str | None:
     selected = _run_fzf(
         lines,
         header=f"enter  {action}   ctrl-r  refresh from provider   esc  back",
-        preview_cmd="qp --_tui-model-info {}",
-        extra_binds=["ctrl-r:reload(qp --update-models 1>&2; qp --_tui-list-models)"],
+        preview_cmd=f"{_SELF} --_tui-model-info {{}}",
+        extra_binds=[
+            f"ctrl-r:reload({_SELF} --update-models 1>&2; {_SELF} --_tui-list-models)"
+        ],
         prompt="model> ",
         border_label="qp · models",
         ansi=True,
@@ -234,7 +240,7 @@ def _config_view() -> None:
             header="enter  edit   ctrl-e  open full file in $EDITOR   esc  back",
             preview_cmd=preview,
             extra_binds=[
-                "ctrl-e:execute(qp --config-edit)+reload(qp --_tui-config-lines)"
+                f"ctrl-e:execute({_SELF} --config-edit)+reload({_SELF} --_tui-config-lines)"
             ],
             prompt="config> ",
             border_label="qp · config",

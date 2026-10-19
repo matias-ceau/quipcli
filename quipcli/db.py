@@ -2,6 +2,8 @@ import json
 import sqlite3
 import sys
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 
 from . import constants
@@ -15,9 +17,13 @@ class _UsageStats:
     cost_usd: float | None = None
 
 
-def _db_conn() -> sqlite3.Connection:
-    constants._DATA_DIR.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(constants._HISTORY_DB, timeout=5)
+# Paths whose schema was already ensured in this process — a single `qp` call
+# opens the DB several times (history, messages, session lookup) and the DDL
+# only needs to run once.
+_SCHEMA_READY: set[str] = set()
+
+
+def _ensure_schema(conn: sqlite3.Connection) -> None:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("""
         CREATE TABLE IF NOT EXISTS history (
@@ -49,7 +55,27 @@ def _db_conn() -> sqlite3.Connection:
     )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_ts ON messages(ts)")
     conn.commit()
-    return conn
+
+
+@contextmanager
+def _db_conn() -> Iterator[sqlite3.Connection]:
+    """Open the history DB, commit on success / roll back on error, always close.
+
+    (`with sqlite3.connect(...)` alone only manages the transaction — it never
+    closes the connection.)"""
+    constants._DATA_DIR.mkdir(parents=True, exist_ok=True)
+    key = str(constants._HISTORY_DB)
+    if not constants._HISTORY_DB.exists():
+        _SCHEMA_READY.discard(key)  # file was removed since — recreate tables
+    conn = sqlite3.connect(constants._HISTORY_DB, timeout=5)
+    try:
+        if key not in _SCHEMA_READY:
+            _ensure_schema(conn)
+            _SCHEMA_READY.add(key)
+        with conn:
+            yield conn
+    finally:
+        conn.close()
 
 
 def _record_usage(stats: _UsageStats, mode: str) -> None:
@@ -106,7 +132,7 @@ def _get_session_messages(session_id: str) -> list[dict]:
     try:
         with _db_conn() as conn:
             rows = conn.execute(
-                "SELECT role, content FROM messages WHERE session_id=? ORDER BY ts",
+                "SELECT role, content FROM messages WHERE session_id=? ORDER BY ts, id",
                 (session_id,),
             ).fetchall()
     except sqlite3.Error, OSError:
@@ -130,7 +156,7 @@ def _last_session_id() -> str | None:
     try:
         with _db_conn() as conn:
             row = conn.execute(
-                "SELECT session_id FROM messages ORDER BY ts DESC LIMIT 1"
+                "SELECT session_id FROM messages ORDER BY ts DESC, id DESC LIMIT 1"
             ).fetchone()
         return row[0] if row else None
     except sqlite3.Error, OSError:
