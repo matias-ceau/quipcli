@@ -94,7 +94,7 @@ qp -m openrouter/pareto-code -c write a merge sort in rust               # Paret
 qp -m "anthropic/claude-3-5-haiku:thinking" solve this step by step      # :thinking / :nitro / :extended / :free variants
 ```
 
-See OpenRouter's [Auto Router](https://openrouter.ai/docs/guides/routing/routers/auto-router) and [Pareto Router](https://openrouter.ai/docs/guides/routing/routers/pareto-router) docs for details. `qp --model-set openrouter/auto-beta` persists one of these as your default the same way as any other model name.
+See OpenRouter's [Auto Router](https://openrouter.ai/docs/guides/routing/routers/auto-router) and [Pareto Router](https://openrouter.ai/docs/guides/routing/routers/pareto-router) docs for details. `qp --model-set openrouter/auto-beta` persists one of these as your default the same way as any other model name. The stats line always shows the model that actually answered (`[openrouter/auto → deepseek/deepseek-v4.1-flash | 38 tok | $0.0000]`), and that real model is what's recorded in history.
 
 ### Offline / Ollama fallback
 
