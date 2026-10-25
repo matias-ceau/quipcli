@@ -3161,7 +3161,7 @@ class TestTuiHelpers:
             patch("quipcli.constants._CONFIG_FILE", cfg_file),
         ):
             lines = quipcli._model_lines()
-        assert lines[0] == "  a"
+        assert lines[0].split()[0] == "a"
         assert quipcli._model_id_from_line(lines[1]) == "b"
         assert "\033[32m" in lines[1]
 
@@ -3838,3 +3838,176 @@ class TestRunConfirmed:
         with patch("quipcli.execute._ask", return_value="n"):
             assert quipcli.execute.run_confirmed("ls", "p") is None
         assert quipcli.execute.run_confirmed("", "p") is None
+
+
+# ── Model table (rank + prices) ───────────────────────────────────────────────
+
+
+def _write_model_caches(tmp_path, models, ranking=()):
+    mc = tmp_path / "models.json"
+    mc.write_text(json.dumps({"data": models}))
+    rc = tmp_path / "rankings.json"
+    rc.write_text(
+        json.dumps(
+            {
+                "date": "2026-07-23",
+                "data": [
+                    {"rank": r, "model_permaslug": s, "total_tokens": 1}
+                    for r, s in ranking
+                ],
+            }
+        )
+    )
+    return mc, rc
+
+
+_TABLE_MODELS = [
+    {
+        "id": "b/free",
+        "canonical_slug": "b/free-1",
+        "pricing": {"prompt": "0", "completion": "0"},
+        "context_length": 8192,
+    },
+    {
+        "id": "a/cheap",
+        "canonical_slug": "a/cheap-1",
+        "pricing": {"prompt": "0.0000001", "completion": "0.0000004"},
+        "context_length": 128000,
+    },
+    {
+        "id": "c/top",
+        "canonical_slug": "c/top-1",
+        "pricing": {"prompt": "0.000003", "completion": "0.000015"},
+        "context_length": 1048576,
+    },
+    {"id": "d/nodata", "canonical_slug": "d/nodata-1"},
+]
+
+
+class TestModelRows:
+    def _rows(self, tmp_path, ids=None):
+        mc, rc = _write_model_caches(
+            tmp_path, _TABLE_MODELS, ranking=[(1, "c/top-1"), (2, "a/cheap-1")]
+        )
+        with (
+            patch("quipcli.constants._MODELS_CACHE", mc),
+            patch("quipcli.constants._RANKINGS_CACHE", rc),
+        ):
+            return quipcli._model_rows(ids)
+
+    def test_ranked_first_then_alphabetical(self, tmp_path):
+        rows = self._rows(tmp_path)
+        assert [r["id"] for r in rows] == [
+            "c/top",
+            "a/cheap",
+            "b/free",
+            "d/nodata",
+        ]
+
+    def test_prices_per_million_and_context(self, tmp_path):
+        top = self._rows(tmp_path)[0]
+        assert top["rank"] == 1
+        assert top["price_in"] == pytest.approx(3.0)
+        assert top["price_out"] == pytest.approx(15.0)
+        assert top["context"] == 1048576
+
+    def test_missing_data_is_none(self, tmp_path):
+        nodata = self._rows(tmp_path)[-1]
+        assert nodata["rank"] is None
+        assert nodata["price_in"] is None
+        assert nodata["price_out"] is None
+        assert nodata["context"] is None
+
+    def test_ids_filter_restricts_rows(self, tmp_path):
+        rows = self._rows(tmp_path, ["b/free", "a/cheap"])
+        assert [r["id"] for r in rows] == ["a/cheap", "b/free"]
+
+    def test_no_rankings_cache_still_works(self, tmp_path):
+        mc, _ = _write_model_caches(tmp_path, _TABLE_MODELS)
+        with (
+            patch("quipcli.constants._MODELS_CACHE", mc),
+            patch("quipcli.constants._RANKINGS_CACHE", tmp_path / "none.json"),
+        ):
+            rows = quipcli._model_rows()
+        assert [r["id"] for r in rows] == ["a/cheap", "b/free", "c/top", "d/nodata"]
+        assert all(r["rank"] is None for r in rows)
+
+
+class TestModelColumns:
+    def _cols(self, tmp_path):
+        mc, rc = _write_model_caches(tmp_path, _TABLE_MODELS, ranking=[(1, "c/top-1")])
+        with (
+            patch("quipcli.constants._MODELS_CACHE", mc),
+            patch("quipcli.constants._RANKINGS_CACHE", rc),
+        ):
+            return dict(quipcli._model_columns())
+
+    def test_line_contents(self, tmp_path):
+        cols = self._cols(tmp_path)
+        assert cols["c/top"].split() == ["c/top", "#1", "3.00", "15.00", "1M"]
+        assert cols["a/cheap"].split() == ["a/cheap", "–", "0.10", "0.40", "128k"]
+        assert cols["b/free"].split() == ["b/free", "–", "free", "free", "8k"]
+        assert cols["d/nodata"].split() == ["d/nodata", "–", "–", "–", "–"]
+
+    def test_columns_are_aligned(self, tmp_path):
+        cols = self._cols(tmp_path)
+        assert len({len(line) for line in cols.values()}) == 1
+
+
+class TestModelIdFromLine:
+    def test_plain_and_marked_lines(self):
+        from quipcli.tui import _model_id_from_line
+
+        assert _model_id_from_line("  a/b   #1  3.00  15.00  1M") == "a/b"
+        assert _model_id_from_line("● a/b   #1  3.00  15.00  1M") == "a/b"
+        assert _model_id_from_line("\033[32m● a/b  –  1  2  8k\033[0m") == "a/b"
+
+    def test_id_only_line(self):
+        from quipcli.tui import _model_id_from_line
+
+        assert _model_id_from_line("  a/b") == "a/b"
+
+
+class TestDoModelsOutput:
+    def _run(self, tmp_path, capsys, tty):
+        mc, rc = _write_model_caches(tmp_path, _TABLE_MODELS, ranking=[(1, "c/top-1")])
+        with (
+            patch("quipcli.constants._MODELS_CACHE", mc),
+            patch("quipcli.constants._RANKINGS_CACHE", rc),
+            patch("quipcli.entry._resolve_default_model", return_value="c/top"),
+            patch("quipcli.entry._color_enabled", return_value=False),
+            patch("quipcli.entry.sys.stdout.isatty", return_value=tty),
+        ):
+            quipcli.entry._do_models(None, None)
+        return capsys.readouterr().out.splitlines()
+
+    def test_piped_output_is_ids_only(self, tmp_path, capsys):
+        out = self._run(tmp_path, capsys, tty=False)
+        assert out == ["  a/cheap", "  b/free", "* c/top", "  d/nodata"]
+
+    def test_tty_output_has_columns_and_marker(self, tmp_path, capsys):
+        out = self._run(tmp_path, capsys, tty=True)
+        assert out[0].startswith("* c/top")
+        assert out[0].split() == ["*", "c/top", "#1", "3.00", "15.00", "1M"]
+        assert out[1].split()[0] == "a/cheap"
+
+
+class TestModelsTuiRouting:
+    def test_models_tui_opens_picker_with_filters(self):
+        with (
+            patch("quipcli.tui._require_fzf"),
+            patch("quipcli.tui._models_view") as view,
+            patch("sys.argv", ["qp", "--models", "-t", "--in", "image"]),
+        ):
+            quipcli.main()
+        view.assert_called_once()
+        assert view.call_args.kwargs.get("in_filter") == "image"
+
+    def test_model_set_tui_opens_same_picker(self):
+        with (
+            patch("quipcli.tui._require_fzf"),
+            patch("quipcli.tui._models_view") as view,
+            patch("sys.argv", ["qp", "--model-set", "-t"]),
+        ):
+            quipcli.main()
+        view.assert_called_once()

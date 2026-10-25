@@ -54,7 +54,7 @@ qp [-e|-c|-a] [-m MODEL] [-r EFFORT] [-P SYSTEM] [-s SESSION|-f] [-i FILE] [-q] 
 | `-S` | List sessions (● = current) |
 | `-i FILE` | Attach a file (repeatable): images/PDF/audio/video (`.mp3 .wav .ogg .flac .m4a .aac .aiff`, `.mp4 .webm .mov .mpeg`) as multimodal content, any other text file inlined into the prompt |
 | `-q` | Quiet: suppress usage stats, informational stderr lines, and the reasoning display |
-| `--models` [`--in`/`--out`] | List cached models (marked default), filterable by modality |
+| `--models` [`--in`/`--out`] [`-t`] | List cached models with usage rank, price per 1M tokens and context (marked default; ids only when piped), filterable by modality; `-t` opens the fzf picker |
 | `--model-get` / `--model-set [MODEL]` | Print / set the default model |
 | `--config-edit` | Open `config.json` in `$EDITOR` |
 | `--status` | Show current configuration |
@@ -145,7 +145,7 @@ Commands and their arguments (models, efforts, paths) are Tab-completed.
 Shells out to the real `fzf` (and `bat`, for preview syntax highlighting) — no reimplemented fuzzy-finder, and it inherits your existing `FZF_DEFAULT_OPTS` if you have one.
 
 - **Sessions** (`qp -S -t`, `/sessions`) — the query searches session names *and message contents* (every term must match, case-insensitive), re-queried from SQLite as you type; the preview shows each hit highlighted in context, then the end of the conversation. `Enter` makes the session current (continue with `qp -f`), `Alt-Enter` opens it interactively.
-- **Models** (`qp --model-set`, `/model`) — fuzzy list of cached models, current default marked `*`. The preview pane shows name, context length, price per 1M tokens (prompt/completion), input/output modalities, usage rank (once `qp --update-rankings` has been run), and the model's description from the provider. `Enter` sets the highlighted model as the new default; `ctrl-r` refreshes the cache from the provider without leaving the picker.
+- **Models** (`qp --models -t`, `qp --model-set -t`, `/model`) — fuzzy list of cached models with usage rank, price per 1M tokens (in/out) and context columns, current default marked `*`. The preview pane shows name, context length, price per 1M tokens (prompt/completion), input/output modalities, usage rank (once `qp --update-rankings` has been run), and the model's description from the provider. `Enter` sets the highlighted model as the new default; `ctrl-r` refreshes the cache from the provider without leaving the picker.
 - **Config** (`qp --config-edit -t`, `/config`) — fuzzy list of editable keys (`default_model`, `reasoning_effort`, `chat_system_prompt`, `execute_system_prompt`, `code_system_prompt`, `agent_system_prompt`, `system_prompt`, `ollama_model`), with the live `config.json` shown via `bat` on the right. `Enter` on `default_model` drills into the Models list; on `reasoning_effort`, into a list of effort levels (or `(model default)` to remove the key); on `ollama_model`, into a list of locally available Ollama models (falls back to free-text entry if Ollama is unreachable); on any `*_system_prompt` key, opens `$EDITOR` on just that value. `ctrl-e` opens the whole config file in `$EDITOR` at any time.
 
 `Esc` steps back one level. Requires `fzf` — `qp --model-set` (no value) falls back to a plain numbered prompt without it.

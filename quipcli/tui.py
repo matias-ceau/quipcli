@@ -19,7 +19,7 @@ from .db import (
 )
 from .execute import _edit_text_value
 from .http_client import _ollama_models
-from .models import _load_models, _load_models_full, _ranking_for
+from .models import _load_models_full, _model_columns, _ranking_for
 
 _CONFIG_KEYS = [
     "default_model",
@@ -119,18 +119,28 @@ _SELF = f"{shlex.quote(sys.executable)} -m quipcli"
 
 
 def _model_id_from_line(line: str) -> str:
-    line = _strip_ansi(line)
-    return line[2:].strip() if len(line) > 2 else line.strip()
+    words = _strip_ansi(line).split()
+    if words and words[0] in ("●", "*"):
+        words = words[1:]
+    return words[0] if words else ""
 
 
-def _model_lines() -> list[str]:
+def _model_lines(
+    in_filter: str | None = None, out_filter: str | None = None
+) -> list[str]:
+    from .models import _list_models_by_modality
+
+    ids = None
+    if in_filter or out_filter:
+        split = lambda v: [x.strip() for x in v.split(",")] if v else None
+        ids = _list_models_by_modality(split(in_filter), split(out_filter))
     current = _resolve_default_model()
     lines = []
-    for m in _load_models():
-        if m == current:
-            lines.append(f"\033[32m● {m}\033[0m")
+    for model_id, text in _model_columns(ids):
+        if model_id == current:
+            lines.append(f"\033[32m● {text}\033[0m")
         else:
-            lines.append(f"  {m}")
+            lines.append(f"  {text}")
     return lines
 
 
@@ -189,18 +199,33 @@ def _print_model_info(line: str) -> None:
     print("(no cached details — run: qp --update-models)")
 
 
-def _models_view(picker_mode: bool = False) -> str | None:
-    lines = _model_lines()
+def _models_view(
+    picker_mode: bool = False,
+    in_filter: str | None = None,
+    out_filter: str | None = None,
+) -> str | None:
+    lines = _model_lines(in_filter, out_filter)
     if not lines:
         print("No cached models — run: qp --update-models", file=sys.stderr)
         return None
     action = "pick" if picker_mode else "set as default"
+    reload_filters = "".join(
+        f" {flag} {shlex.quote(value)}"
+        for flag, value in (("--in", in_filter), ("--out", out_filter))
+        if value
+    )
     selected = _run_fzf(
         lines,
-        header=f"enter  {action}   ctrl-r  refresh from provider   esc  back",
+        header=(
+            f"enter  {action}   ctrl-r  refresh from provider   esc  back\n"
+            "columns: rank · $/1M in · $/1M out · context"
+        ),
         preview_cmd=f"{_SELF} --_tui-model-info {{}}",
         extra_binds=[
-            f"ctrl-r:reload({_SELF} --update-models 1>&2; {_SELF} --_tui-list-models)"
+            (
+                f"ctrl-r:reload({_SELF} --update-models 1>&2; {_SELF} --models "
+                f"--_tui-list-models{reload_filters})"
+            )
         ],
         prompt="model> ",
         border_label="qp · models",
