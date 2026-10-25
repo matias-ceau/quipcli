@@ -29,6 +29,7 @@ from .models import (
     _list_models_by_modality,
     _load_models,
     _maybe_update_models_bg,
+    _model_columns,
     _resolve_model_name,
 )
 from .turn import (
@@ -63,8 +64,14 @@ def _do_models(in_filter: str | None, out_filter: str | None) -> None:
 
     marker = "\033[1;32m*\033[0m" if _color_enabled() else "*"
     current = _resolve_default_model()
-    for m in models:
-        print(f"{marker} {m}" if m == current else f"  {m}")
+    if sys.stdout.isatty():
+        lines = dict(_model_columns(models))
+        ordered = [m for m, _ in _model_columns(models)]
+    else:
+        lines = {m: m for m in models}
+        ordered = models
+    for m in ordered:
+        print(f"{marker} {lines[m]}" if m == current else f"  {lines[m]}")
 
 
 def _do_model_get() -> None:
@@ -269,7 +276,7 @@ def _main() -> None:
     if args.tui_list_models:
         from .tui import _model_lines
 
-        print("\n".join(_model_lines()))
+        print("\n".join(_model_lines(args.in_filter, args.out_filter)))
         return
 
     if args.tui_session_lines is not None:
@@ -321,7 +328,13 @@ def _main() -> None:
         return
 
     if args.models:
-        _do_models(args.in_filter, args.out_filter)
+        if args.tui:
+            from .tui import _models_view, _require_fzf
+
+            _require_fzf()
+            _models_view(in_filter=args.in_filter, out_filter=args.out_filter)
+        else:
+            _do_models(args.in_filter, args.out_filter)
         return
 
     if args.model_get:
@@ -329,7 +342,13 @@ def _main() -> None:
         return
 
     if args.model_set is not None:
-        _do_model_set(args.model_set)
+        if args.tui and not args.model_set:
+            from .tui import _models_view, _require_fzf
+
+            _require_fzf()
+            _models_view()
+        else:
+            _do_model_set(args.model_set)
         return
 
     if args.config_edit:

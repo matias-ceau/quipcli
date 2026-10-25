@@ -25,7 +25,9 @@ qp — quick reference
   qp -S                                list sessions (● = current)
   qp -P "be terse" ...                 override the system prompt
 
-  qp --models                          list cached models (* = default)
+  qp --models                          list cached models with rank, $/1M in/out, context
+                                       (* = default; bare ids when piped)
+  qp --models -t                       fzf picker (same columns), Enter sets the default
   qp --models --in image               models accepting image input
   qp --models --out audio              models that can generate audio
   qp --model-get                       print current default model
@@ -169,6 +171,12 @@ OPTIONS
                         shows the model's rank and daily token count.
 
     --models            List cached models (* marks the current default), then exit.
+                        On a TTY each line also shows usage rank (needs
+                        --update-rankings; ranked models first), price per 1M
+                        tokens in/out ("free" if 0) and context length. When
+                        piped, only model ids are printed, one per line.
+                        With -t/--tui: fzf picker with the same columns,
+                        --in/--out applied; Enter sets the default model.
       --in MOD,MOD       Filter by required input modalities (comma-separated).
       --out MOD,MOD       Filter by required output modalities.
                         Valid modalities: text, image, audio, video, file.
@@ -313,8 +321,9 @@ PICKERS (fzf)
                end of the conversation. Enter makes the session current
                (continue with qp -f); Alt-Enter opens it interactively.
 
-      Models (qp --model-set, /model)
-               Fuzzy list of cached models, current default marked with *.
+      Models (qp --models -t, qp --model-set -t, /model)
+               Fuzzy list of cached models with rank, $/1M in/out and
+               context columns, current default marked with *.
                Right-hand preview: name, context length, price per 1M
                tokens (prompt/completion), input/output modalities, usage
                rank (only if --update-rankings has been run), and the

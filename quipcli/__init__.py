@@ -45,6 +45,8 @@ from .models import (
     _fetch_rankings,
     _list_models_by_modality,
     _load_models,
+    _model_columns,
+    _model_rows,
     _load_rankings,
     _maybe_update_models_bg,
     _models_url,

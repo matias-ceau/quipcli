@@ -194,6 +194,71 @@ def _ranking_for(permaslug: str) -> dict | None:
     return None
 
 
+def _model_rows(ids: list[str] | None = None) -> list[dict]:
+    """Cached models with usage rank and prices ($ per 1M tokens), ranked
+    models first (by rank), then the rest alphabetically. `ids` restricts the
+    set. Missing data is None."""
+
+    def _per_million(pricing: dict, key: str) -> float | None:
+        try:
+            return float(pricing[key]) * 1_000_000
+        except KeyError, TypeError, ValueError:
+            return None
+
+    wanted = set(ids) if ids is not None else None
+    rows = []
+    for m in _load_models_full():
+        if wanted is not None and m.get("id") not in wanted:
+            continue
+        pricing = m.get("pricing") or {}
+        ranking = _ranking_for(m.get("canonical_slug", ""))
+        rows.append(
+            {
+                "id": m["id"],
+                "rank": ranking["rank"] if ranking else None,
+                "price_in": _per_million(pricing, "prompt"),
+                "price_out": _per_million(pricing, "completion"),
+                "context": m.get("context_length"),
+            }
+        )
+    rows.sort(key=lambda r: (r["rank"] is None, r["rank"] or 0, r["id"]))
+    return rows
+
+
+def _fmt_price(value: float | None) -> str:
+    if value is None:
+        return "–"
+    return "free" if value == 0 else f"{value:.2f}"
+
+
+def _fmt_context(tokens: int | None) -> str:
+    if not tokens:
+        return "–"
+    if tokens >= 1_000_000:
+        return f"{tokens / 1_000_000:.1f}".removesuffix(".0") + "M"
+    return f"{tokens // 1000}k"
+
+
+def _model_columns(ids: list[str] | None = None) -> list[tuple[str, str]]:
+    """(model id, aligned table line) pairs: id, rank, $/1M in, $/1M out, context."""
+    rows = _model_rows(ids)
+    width = max((len(r["id"]) for r in rows), default=0)
+    out = []
+    for r in rows:
+        rank = f"#{r['rank']}" if r["rank"] else "–"
+        out.append(
+            (
+                r["id"],
+                (
+                    f"{r['id']:<{width}}  {rank:>4}  {_fmt_price(r['price_in']):>6}"
+                    f"  {_fmt_price(r['price_out']):>6}"
+                    f"  {_fmt_context(r['context']):>5}"
+                ),
+            )
+        )
+    return out
+
+
 def _resolve_model_name(name: str) -> str:
     """Resolve a partial/substring model name against the cache.
 
