@@ -4,7 +4,7 @@ import sys
 
 from . import constants
 
-_HARDCODED_DEFAULT_MODEL = "openai/gpt-4o-mini"
+_HARDCODED_DEFAULT_MODEL = "openrouter/pareto-code"
 
 _warned_bad_config = False
 

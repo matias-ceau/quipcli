@@ -2088,7 +2088,7 @@ class TestConfig:
     def test_resolve_hardcoded_fallback(self, monkeypatch, tmp_path):
         monkeypatch.delenv("LLM_CMD_MODEL", raising=False)
         with patch("quipcli.constants._CONFIG_FILE", tmp_path / "missing.json"):
-            assert quipcli._resolve_default_model() == "openai/gpt-4o-mini"
+            assert quipcli._resolve_default_model() == "openrouter/pareto-code"
 
     def test_ensure_config_creates_file(self, monkeypatch, tmp_path):
         monkeypatch.delenv("LLM_CMD_MODEL", raising=False)

@@ -46,7 +46,7 @@ qp [-e|-c|-a] [-m MODEL] [-r EFFORT] [-P SYSTEM] [-s SESSION|-f] [-i FILE] [-q] 
 | `-a` | Agent mode: multi-turn tool-calling loop — see below. Mutually exclusive with `-e`/`-c` |
 | `--max-steps N` | With `-a`: max tool-calling loop iterations (default: 12) |
 | `--no-web` | With `-a`: disable the hosted web search/fetch tools for this call |
-| `-m MODEL` | Override model (default: `openai/gpt-4o-mini`). MODEL may be a substring matching a single cached model, e.g. `-m haiku` |
+| `-m MODEL` | Override model (default: `openrouter/pareto-code`, OpenRouter's Pareto coding router). MODEL may be a substring matching a single cached model, e.g. `-m haiku` |
 | `-r EFFORT` | Reasoning effort for this call (`max`/`xhigh`/`high`/`medium`/`low`/`minimal`/`none`) — see below |
 | `-P PROMPT` | Override system prompt |
 | `-f` | Continue the current (last used) session — see [Sessions](#sessions) |
@@ -166,7 +166,7 @@ Most of these have no config.json equivalent at all (API key, API URL, Ollama UR
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `OPENROUTER_API_KEY` | — | API key (required unless `LLM_CMD_API_KEY` set, or the provider is a local `http://` endpoint) |
-| `LLM_CMD_MODEL` | config file, or `openai/gpt-4o-mini` | Default model |
+| `LLM_CMD_MODEL` | config file, or `openrouter/pareto-code` | Default model |
 | `LLM_CMD_API_KEY` | `$OPENROUTER_API_KEY` | Override API key |
 | `LLM_CMD_API_URL` | OpenRouter endpoint | Any OpenAI-compatible URL (http:// endpoints need no key) |
 | `LLM_CMD_OLLAMA_URL` | `http://localhost:11434` | Local Ollama used as offline fallback |
