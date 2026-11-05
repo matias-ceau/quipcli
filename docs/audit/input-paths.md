@@ -11,7 +11,7 @@ not just docs. Read-only audit, no source changes made.
 
 | Setting | Precedence (highest → lowest) | Notes |
 |---|---|---|
-| Model | `-m/--model` flag (if passed) → else `$LLM_CMD_MODEL` → `config.json:default_model` → hardcoded `openai/gpt-4o-mini` | Whatever value wins is *then* run through `_resolve_model_name` substring match against the model cache (`entry.py:245`). Argparse's `-m` default is itself `DEFAULT_MODEL`, pre-resolved once at import time in `config.py:55`. |
+| Model | `-m/--model` flag (if passed) → else `$LLM_CMD_MODEL` → `config.json:default_model` → hardcoded `openrouter/pareto-code` | Whatever value wins is *then* run through `_resolve_model_name` substring match against the model cache (`entry.py:245`). Argparse's `-m` default is itself `DEFAULT_MODEL`, pre-resolved once at import time in `config.py:55`. |
 | API key | `$LLM_CMD_API_KEY` → `$OPENROUTER_API_KEY` → `""` | Env-only; no config.json key exists for this. |
 | API URL | `$LLM_CMD_API_URL` → hardcoded OpenRouter endpoint | Env-only; no config.json key. |
 | Ollama URL | `$LLM_CMD_OLLAMA_URL` → hardcoded `http://localhost:11434` | Env-only; no config.json key (distinct from `ollama_model`, which is config-only). |

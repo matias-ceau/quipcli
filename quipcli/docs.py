@@ -118,7 +118,7 @@ OPTIONS
     -m, --model MODEL   Model to use for this invocation. MODEL may be a substring
                         that uniquely matches a cached model id (e.g. "haiku");
                         the resolved id is printed to stderr.
-                        Default: $LLM_CMD_MODEL, config file, or openai/gpt-4o-mini.
+                        Default: $LLM_CMD_MODEL, config file, or openrouter/pareto-code.
 
     -r, --reasoning EFFORT
                         Reasoning effort for this call, sent as OpenRouter's
