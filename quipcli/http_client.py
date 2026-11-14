@@ -12,17 +12,20 @@ from .db import _served_model, _UsageStats
 _RETRIABLE_STATUSES = {429, 500, 502, 503, 529}
 _RETRY_WAITS = (1, 2, 4)  # seconds between attempts (4 attempts total)
 _MAX_RETRY_AFTER = 30  # cap on a server-requested Retry-After, in seconds
+_DEFAULT_TIMEOUT = 30  # socket timeout, in seconds (streamed calls)
 
 
 class _APIStatusError(Exception):
     """Non-transient HTTP error from the API — retries exhausted or pointless."""
 
 
-def _open_connection(parsed) -> http.client.HTTPConnection:
+def _open_connection(
+    parsed, timeout: int = _DEFAULT_TIMEOUT
+) -> http.client.HTTPConnection:
     if parsed.scheme == "http":
-        return http.client.HTTPConnection(parsed.netloc, timeout=30)
+        return http.client.HTTPConnection(parsed.netloc, timeout=timeout)
     return http.client.HTTPSConnection(
-        parsed.netloc, context=constants._SSL_CTX, timeout=30
+        parsed.netloc, context=constants._SSL_CTX, timeout=timeout
     )
 
 
@@ -40,11 +43,15 @@ def _retry_after(resp: http.client.HTTPResponse, default: int) -> int:
     return min(max(value, default), _MAX_RETRY_AFTER)
 
 
-def _post_json(url: str, body: str, api_key: str) -> http.client.HTTPResponse:
+def _post_json(
+    url: str, body: str, api_key: str, timeout: int = _DEFAULT_TIMEOUT
+) -> http.client.HTTPResponse:
     """POST with retry/backoff on connection errors and transient HTTP statuses.
 
     Raises ConnectionError when the endpoint is unreachable (fallback-worthy),
-    _APIStatusError when the API answered with a non-200 status.
+    _APIStatusError when the API answered with a non-200 status — or accepted
+    the request and then stayed silent past `timeout`: the model may well be
+    working (and billing), so that is neither retried nor sent to Ollama.
     """
     parsed = urlparse(url)
     headers = {"Content-Type": "application/json"}
@@ -53,14 +60,26 @@ def _post_json(url: str, body: str, api_key: str) -> http.client.HTTPResponse:
     last_error = ""
     status_error = False
     for wait in (*_RETRY_WAITS, None):
+        resp = None
+        conn = None
         try:
-            conn = _open_connection(parsed)
+            conn = _open_connection(parsed, timeout)
             conn.request("POST", _request_target(parsed), body, headers)
-            resp = conn.getresponse()
         except OSError as e:
             last_error = f"Connection error: {e}"
             status_error = False
-            resp = None
+            conn = None
+        if conn is not None:
+            try:
+                resp = conn.getresponse()
+            except TimeoutError:
+                raise _APIStatusError(
+                    f"no response after {timeout}s (the request was sent; "
+                    "not retried to avoid paying for it twice)"
+                ) from None
+            except OSError as e:
+                last_error = f"Connection error: {e}"
+                status_error = False
         if resp is not None:
             if resp.status == 200:
                 return resp
@@ -105,6 +124,7 @@ def _pick_ollama_model(models: list[str], cfg: dict) -> str:
 def _ollama_fallback(
     body_dict: dict,
     reason: str,
+    timeout: int = _DEFAULT_TIMEOUT,
 ) -> tuple[http.client.HTTPResponse, str] | None:
     models = _ollama_models()
     if not models:
@@ -125,7 +145,9 @@ def _ollama_fallback(
         ]
     body = json.dumps(fallback)
     try:
-        resp = _post_json(f"{constants._OLLAMA_URL}/v1/chat/completions", body, "")
+        resp = _post_json(
+            f"{constants._OLLAMA_URL}/v1/chat/completions", body, "", timeout
+        )
         return resp, model
     except (ConnectionError, _APIStatusError) as e:
         print(f"Error: Ollama fallback failed: {e}", file=sys.stderr)
@@ -138,6 +160,7 @@ def _make_request(
     stream: bool,
     include_usage: bool = False,
     extra: dict | None = None,
+    timeout: int = _DEFAULT_TIMEOUT,
 ) -> tuple[http.client.HTTPResponse, str]:
     """Returns (response, model actually used — may differ on Ollama fallback).
 
@@ -153,7 +176,7 @@ def _make_request(
     is_local = urlparse(constants._API_URL).scheme == "http"
 
     if not constants._API_KEY and not is_local:
-        result = _ollama_fallback(body_dict, "no API key configured")
+        result = _ollama_fallback(body_dict, "no API key configured", timeout)
         if result:
             return result
         print(
@@ -164,12 +187,15 @@ def _make_request(
         sys.exit(1)
 
     try:
-        return _post_json(constants._API_URL, body, constants._API_KEY), model
+        return (
+            _post_json(constants._API_URL, body, constants._API_KEY, timeout),
+            model,
+        )
     except _APIStatusError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
     except ConnectionError as e:
-        result = _ollama_fallback(body_dict, "provider unreachable")
+        result = _ollama_fallback(body_dict, "provider unreachable", timeout)
         if result:
             return result
         print(f"Error: {e}", file=sys.stderr)

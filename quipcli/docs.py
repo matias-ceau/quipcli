@@ -19,7 +19,13 @@ qp — quick reference
                                         persistent: config "reasoning_effort")
   qp -q ...                            suppress usage stats (and reasoning display)
   NO_COLOR=1 qp ...                    disable ANSI markdown styling
-  qp -f what did I just ask            continue the current (last) session
+  qp -f and what if it stalls          follow up: resends this terminal's last
+                                        exchange only, in the same mode (-C = chat)
+  qp -e copy dir a to b                [Y/n/e/r]: r = say what to change, get a
+                                        new command; then: qp -f why did it fail
+  git diff | qp -e commit this         piped prompt; the confirm reads the terminal
+  eval "$(qp --shell-init bash)"       in ~/.bashrc: quotes ; & ( ) $ * in a
+                                        prompt need no escaping (qp what's up?)
   qp -s myconv ask something           continue session "myconv" (name or id
                                         prefix), or start one with that name
   qp -S                                list sessions (● = current)
@@ -67,7 +73,7 @@ NAME
     qp — minimal CLI for LLMs, with an interactive mode (-t) and fzf pickers
 
 SYNOPSIS
-    qp [-e|-c|-a] [-m MODEL] [-r EFFORT] [-P SYSTEM] [-s SESSION|-f] [-i FILE] [-q] [words ...]
+    qp [-e|-c|-a|-C] [-m MODEL] [-r EFFORT] [-P SYSTEM] [-s SESSION|-f] [-i FILE] [-q] [words ...]
     qp [-t] [-e|-c|-a] [-f | -s SESSION | NAME]
     qp -S [-t]
     qp --update-models | --update-rankings | --models [--in MOD] [--out MOD] | --model-get | --model-set [MODEL]
@@ -96,11 +102,16 @@ OPTIONS
                         words at all, stdin becomes the whole prompt.
 
     -e, --execute       Execute mode: generate a shell command, confirm, then run.
-                        Prompts [Y/n/e] — Y is default (Enter to confirm).
+                        Prompts [Y/n/e/r] — Y is default (Enter to confirm).
                         The reply is streamed silently (reasoning still shown
                         dimmed on stderr) and only the command is displayed,
                         in the prompt; a leading ``` fence or "$ " is stripped.
-                        Press e to open the command in $EDITOR with context.
+                        Press e to open the command in $EDITOR with context,
+                        r to say what should change and get a new command
+                        from the model. Whether the command ran, and its exit
+                        status, is noted in the session for a later -f. When
+                        the prompt was piped in (git diff | qp -e ...), the
+                        confirmation is read from the terminal (/dev/tty).
                         Mutually exclusive with -c/-a.
 
     -c, --code          Code mode: generate raw code to stdout (no prose).
@@ -110,7 +121,11 @@ OPTIONS
                         single reply — see AGENT MODE below. Mutually
                         exclusive with -e/-c.
 
-    --max-steps N       With -a: max tool-calling loop iterations (default: 12).
+    -C, --chat          Chat mode. It is the default; the flag only matters
+                        with -f, which otherwise keeps the mode of the turn
+                        it follows.
+
+    --max-steps N       With -a: max tool-calling loop iterations (default: 4).
 
     --no-web            With -a: disable the hosted web search/fetch tools
                         for this call.
@@ -144,16 +159,23 @@ OPTIONS
                         starts with REF (ambiguous prefix → error); if none
                         matches, start a new session named REF.
 
-    -f, --follow-up     Continue the current session — the last one a prompt
-                        was sent to. Mutually exclusive with --session. The
-                        session is announced on stderr.
+    -f, --follow-up     Follow up on the current session — the last one a
+                        prompt was sent to from this terminal (else the last
+                        one overall). Only the last exchange is resent
+                        (config "follow_history"), and the mode of that turn
+                        is kept: after qp -e, a bare qp -f returns a new
+                        command; -C asks in plain chat instead. Mutually
+                        exclusive with --session. The session is announced
+                        on stderr.
 
     -i, --input FILE    Explicitly pass a file as input. Repeatable. Media
                         files (see MULTIMODAL) are attached as multimodal
                         content; any other UTF-8 text file is inlined into
                         the prompt as a fenced block; other binary files are
                         skipped with a warning. Media files are also
-                        auto-detected from words by extension.
+                        auto-detected from words by extension. Attachments
+                        are sent once: history keeps a short marker, not the
+                        file, so a follow-up needs -i again to show it again.
 
     -q, --quiet         Suppress post-response usage stats (model, tokens, cost),
                         the informational Model:/Session: stderr lines, and
@@ -240,9 +262,13 @@ AGENT MODE (-a)
 
     While the model thinks, a dim "thinking…" line shows on stderr, and its
     reasoning (if any) is printed dimmed after each step (TTY only, hidden
-    by -q). If --max-steps iterations (default 12) pass without a final
-    answer, qp makes one last call with tools disabled so the model has to
-    summarize what it found.
+    by -q). If --max-steps iterations (default 4 — this is for small jobs,
+    a couple of tool calls and an answer) pass without a final answer, qp
+    makes one last call with tools disabled so the model has to summarize
+    what it found. A step may take up to 5 minutes; a request that was sent
+    and got no response is not retried (it could be billed twice).
+    Long command output is cut in the middle: the model sees the start and,
+    mostly, the end — where errors are.
     Token/cost usage accumulates across all steps into one usage-stats line.
 
     The system prompt for this mode is agent_system_prompt in config.json,
@@ -276,6 +302,9 @@ SESSIONS
     significant words (e.g. "update-debtap-database"); the name is shown in
     the usage-stats line. -f continues the current session; commands that
     send no prompt (-S, --status, -h…) never change which one is current.
+    "Current" is per terminal (tty + shell session): -f continues what was
+    asked in this window or tmux pane, and falls back to the last session
+    used anywhere when this terminal hasn't asked anything yet.
 
     qp how do I update the debtap database   # new session
     qp -f and what if it stalls ?            # same session
@@ -283,10 +312,35 @@ SESSIONS
     qp -s 3f9a explain again                 # resume by id prefix
     qp -s myproject explain the architecture # resume, or create "myproject"
 
-    Only the last 40 messages of a session are resent (config
-    "session_history"; 0 = everything), always starting on a user turn,
-    to stay within the model's context window. --status shows the current
-    session.
+    A one-shot qp -f resends only the last exchange — the previous prompt,
+    its reply and, after -e, a note saying whether the command ran and with
+    which exit status (config "follow_history": number of exchanges,
+    default 1; 0 = no narrowing). That is enough to refine a question or
+    criticise a command without burying a small model in old context. It
+    also keeps that turn's mode unless a mode flag (-e/-c/-a/-C) is given.
+    -s and the interactive session resend up to the last 40 messages
+    (config "session_history"; 0 = everything), always starting on a user
+    turn. --status shows the current session.
+
+RAW-LINE SHELL INTEGRATION (--shell-init)
+    The shell splits a command line before qp sees it, so an apostrophe, a
+    ;, &, (, $ or a glob in a question is the shell's to interpret — qp
+    itself cannot prevent that. Add to ~/.bashrc:
+
+      eval "$(qp --shell-init bash)"
+
+    Enter then checks the line: if it is a qp call (qp ... or ... | qp ...)
+    whose prompt contains such characters, the prompt is single-quoted and
+    run as qp --raw '...'. Lines without special characters, and every
+    other command, are left exactly as typed.
+
+      qp what's up; any (real) idea?   →  qp --raw 'what'\\''s up; any (real) idea?'
+
+    Everything from the first " | ", " && ", " > " or " >> " on stays normal
+    shell (qp isn't it | less). QP_RAW_PIPES=0 makes those literal too.
+    In a raw line, flags must come before the prompt: from the first plain
+    word on, everything is prompt text (so "-la" in a question is fine).
+    History keeps the quoted form. bash only for now.
 
 INTERACTIVE SESSION (-t)
     A prompt loop (prompt_toolkit) over the same session machinery: every
@@ -307,7 +361,7 @@ INTERACTIVE SESSION (-t)
       /config                fzf config picker
       /help, /exit
 
-    In exec mode each reply is a command confirmed with [Y/n/e] and run;
+    In exec mode each reply is a command confirmed with [Y/n/e/r] and run;
     the session continues afterwards.
 
 PICKERS (fzf)

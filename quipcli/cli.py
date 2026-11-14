@@ -7,6 +7,7 @@ from .config import DEFAULT_MODEL
 from .db import _UsageStats
 from .models import _load_models
 from .multimodal import _build_user_content
+from .shellinit import SHELLS
 
 
 def _positive_int(raw: str) -> int:
@@ -29,7 +30,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="qp",
         description="Ask questions or run AI-generated shell commands — no quotes needed.",
-        usage="%(prog)s [-e|-c|-a] [-m MODEL] [-r EFFORT] [-S SYSTEM] [-s SESSION|-f] [-i FILE] [-q] [words ...]",
+        usage="%(prog)s [-e|-c|-a|-C] [-m MODEL] [-r EFFORT] [-P SYSTEM] [-s SESSION|-f] [-i FILE] [-q] [words ...]",
     )
     parser.add_argument(
         "words",
@@ -53,14 +54,21 @@ def build_parser() -> argparse.ArgumentParser:
         "-a",
         "--agent",
         action="store_true",
-        help="Agent mode: multi-turn tool-calling loop (shell, file read/write, web search/fetch).",
+        help="Agent mode: short multi-turn tool-calling loop (shell, file read/write, web search/fetch).",
+    )
+    mode_group.add_argument(
+        "-C",
+        "--chat",
+        action="store_true",
+        help="Chat mode — the default; only needed with -f, which otherwise "
+        "keeps the mode of the turn it follows.",
     )
     parser.add_argument(
         "--max-steps",
         type=_positive_int,
-        default=12,
+        default=4,
         metavar="N",
-        help="With -a/--agent: max tool-calling loop iterations (default: 12).",
+        help="With -a/--agent: max tool-calling loop iterations (default: 4).",
     )
     parser.add_argument(
         "--no-web",
@@ -108,7 +116,8 @@ def build_parser() -> argparse.ArgumentParser:
         "-f",
         "--follow-up",
         action="store_true",
-        help="Continue the current (last used) session.",
+        help="Follow up on this terminal's last exchange: resends only that "
+        "exchange (config follow_history) and keeps its mode.",
     )
     parser.add_argument(
         "-i",
@@ -229,6 +238,14 @@ def build_parser() -> argparse.ArgumentParser:
         dest="tui_config_lines",
         action="store_true",
         help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--shell-init",
+        choices=SHELLS,
+        default=None,
+        metavar="SHELL",
+        help="Print the raw-line shell integration (bash) to eval in your rc "
+        "file: quotes, ;, & and globs in a prompt then need no escaping.",
     )
     parser.add_argument(
         "--version",

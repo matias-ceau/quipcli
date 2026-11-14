@@ -16,7 +16,11 @@ from .db import _served_model, _UsageStats
 from .http_client import _make_request, _MarkdownAnsiRenderer, _use_markdown_rendering
 from .tools import default_tools, execute_tool_call
 
-_DEFAULT_MAX_STEPS = 12
+# qp's agent is for small jobs — a couple of tool calls, then an answer.
+_DEFAULT_MAX_STEPS = 4
+# Steps aren't streamed: nothing arrives until the model is done thinking, so
+# the socket has to wait far longer than a streamed call's 30s.
+_STEP_TIMEOUT = 300
 
 
 def _is_openrouter() -> bool:
@@ -49,7 +53,9 @@ class _Progress:
 
 def _step(messages: list[dict], model: str, extra: dict) -> tuple[dict, dict, str]:
     """One non-streaming chat-completions call → (message, usage, model served)."""
-    resp, used_model = _make_request(messages, model, stream=False, extra=extra)
+    resp, used_model = _make_request(
+        messages, model, stream=False, extra=extra, timeout=_STEP_TIMEOUT
+    )
     raw = resp.read().decode(errors="replace")
     try:
         data = json.loads(raw)

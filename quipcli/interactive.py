@@ -4,17 +4,9 @@ the same run_turn() one-shot `qp` uses, plus a few /commands."""
 import shlex
 import shutil
 import sys
-from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
-
-from prompt_toolkit.completion import (
-    CompleteEvent,
-    Completer,
-    Completion,
-    PathCompleter,
-)
-from prompt_toolkit.document import Document
+from typing import Any
 
 from . import constants
 from .config import _load_config
@@ -23,7 +15,6 @@ from .http_client import _MarkdownAnsiRenderer, _use_markdown_rendering
 from .models import (
     _check_modality_support,
     _check_reasoning_support,
-    _load_models,
     _resolve_model_name,
 )
 from .multimodal import _build_user_content
@@ -75,48 +66,23 @@ class _State:
         return " " + " │ ".join(parts)
 
 
-class _Completer(Completer):
-    """Completes /commands, then their argument (models, efforts, modes, paths)."""
+def __getattr__(name: str) -> Any:
+    # _Completer subclasses a prompt_toolkit class, and importing
+    # prompt_toolkit costs ~50 ms — only an interactive session should pay.
+    if name == "_Completer":
+        from .completer import _Completer
 
-    def __init__(self) -> None:
-        self._models: list[str] | None = None
-        self._paths = PathCompleter(expanduser=True)
-
-    def get_completions(
-        self, document: Document, complete_event: CompleteEvent
-    ) -> Iterable[Completion]:
-        text = document.text_before_cursor
-        if not text.startswith("/"):
-            return
-        if " " not in text:
-            for cmd, help_text in _COMMANDS.items():
-                if cmd.startswith(text):
-                    yield Completion(cmd, -len(text), display_meta=help_text)
-            return
-        cmd, _, arg = text.partition(" ")
-        if cmd == "/attach":
-            word = arg.rsplit(" ", 1)[-1]
-            yield from self._paths.get_completions(Document(word), complete_event)
-            return
-        if cmd == "/model":
-            if self._models is None:
-                self._models = _load_models()
-            options = self._models
-        elif cmd == "/reasoning":
-            options = [*constants.REASONING_EFFORTS, "default"]
-        elif cmd == "/mode":
-            options = ["chat", "code", "exec", "agent"]
-        else:
-            return
-        for option in options:
-            if arg.lower() in option.lower():
-                yield Completion(option, -len(arg))
+        return _Completer
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def _print_message(role: str, content: str | list) -> None:
     text = _prompt_text(content) if isinstance(content, list) else content
     if role == "user":
         print(f"{_BOLD_CYAN}› {text}{_RESET}")
+        return
+    if role == "note":
+        print(f"{_DIM}{text}{_RESET}")
         return
     if _use_markdown_rendering():
         renderer = _MarkdownAnsiRenderer()
@@ -241,6 +207,8 @@ def run_interactive(opts: TurnOptions, session: _Session) -> None:
     from prompt_toolkit.formatted_text import ANSI
     from prompt_toolkit.history import FileHistory
     from prompt_toolkit.key_binding import KeyBindings
+
+    from .completer import _Completer
 
     opts.show_stats = not opts.quiet
     state = _State(

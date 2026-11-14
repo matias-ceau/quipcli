@@ -134,4 +134,10 @@ _MAX_FILE_BYTES = 20 * 1024 * 1024  # 20 MB warning threshold
 # 0 = unlimited) — keeps long sessions inside the model's context window.
 SESSION_HISTORY = 40
 
+# Past exchanges (prompt + reply) a one-shot `qp -f` resends (config
+# "follow_history" overrides; 0 = the whole SESSION_HISTORY window). One is
+# enough to refine a question or criticise a command, and keeps small models
+# from drowning in context they weren't asked about.
+FOLLOW_HISTORY = 1
+
 REASONING_EFFORTS = ("max", "xhigh", "high", "medium", "low", "minimal", "none")

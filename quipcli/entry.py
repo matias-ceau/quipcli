@@ -16,6 +16,7 @@ from .context import _machine_context
 from .db import (
     _age,
     _current_session_id,
+    _last_mode,
     _list_sessions,
     _resolve_session,
     _session_info,
@@ -32,9 +33,12 @@ from .models import (
     _model_columns,
     _resolve_model_name,
 )
+from .shellinit import _split_raw, shell_init
 from .turn import (
     _MODE_PROMPT_DEFAULTS,
+    MODES,
     TurnOptions,
+    _follow_limit,
     _history_limit,
     _mode_from_flags,
     _prompt_text,
@@ -212,6 +216,22 @@ def _do_cost(period: str) -> None:
     print(f"Cost        : {cost_str}")
 
 
+def _inherit_mode(args, opts: TurnOptions, session_id: str) -> None:
+    """A bare `-f` keeps the mode of the turn it follows (`qp -e …` then
+    `qp -f use rsync instead` → another command); any mode flag, including
+    -C for plain chat, overrides."""
+    if not args.follow_up or args.execute or args.code or args.agent or args.chat:
+        return
+    mode = _last_mode(session_id)
+    if mode in MODES and mode != opts.mode:
+        opts.mode = mode
+        if not args.quiet:
+            print(
+                f"\033[2mMode: {mode} (from the last turn; -C for chat)\033[0m",
+                file=sys.stderr,
+            )
+
+
 def main() -> None:
     try:
         _main()
@@ -242,7 +262,16 @@ def _main() -> None:
         {f"{mode}_system_prompt": text for mode, text in _MODE_PROMPT_DEFAULTS.items()}
     )
 
-    args = parser.parse_args()
+    # `qp --raw 'LINE'` (sent by the --shell-init hook): the line as typed,
+    # untouched by the shell — split it ourselves.
+    argv = sys.argv[1:]
+    if argv[:1] == ["--raw"]:
+        argv = _split_raw(" ".join(argv[1:]), parser)
+    args = parser.parse_args(argv)
+
+    if args.shell_init:
+        print(shell_init(args.shell_init), end="")
+        return
 
     # --model-set/--cost use nargs="?", so argparse greedily consumes the next
     # bare word as their value even when it was meant to start a prompt (e.g.
@@ -415,14 +444,20 @@ def _main() -> None:
         session = _resolve_session(
             session_ref, args.follow_up, args.quiet, history_limit=_history_limit(cfg)
         )
+        _inherit_mode(args, opts, session.id)
         from .interactive import run_interactive
 
         run_interactive(opts, session)
         return
 
     session = _resolve_session(
-        args.session, args.follow_up, args.quiet, history_limit=_history_limit(cfg)
+        args.session,
+        args.follow_up,
+        args.quiet,
+        history_limit=_history_limit(cfg),
+        follow_exchanges=_follow_limit(cfg),
     )
+    _inherit_mode(args, opts, session.id)
     user_content, detected_mods = get_content(args)
     _check_modality_support(args.model, detected_mods)
     run_turn(opts, session, user_content, _prompt_text(user_content))

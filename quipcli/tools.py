@@ -8,15 +8,46 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from typing import IO
 
 _MAX_OUTPUT_CHARS = 4000
+
+
+def _open_tty() -> IO[str]:
+    """The controlling terminal, for talking to the user when stdin is a pipe."""
+    return open("/dev/tty")
+
+
+def _tty_stdin() -> IO[str] | None:
+    """A terminal handle to give a child process (the command to run, or
+    $EDITOR) as stdin when ours is a spent pipe; None when stdin already is
+    a terminal or there is no terminal at all."""
+    if sys.stdin.isatty():
+        return None
+    try:
+        return _open_tty()
+    except OSError:
+        return None
 
 
 def _ask(prompt: str) -> str:
     # The prompt goes to stderr (like the command preview above it) so it
     # stays visible when stdout is redirected, e.g. `qp -a ... > answer.md`.
     print(prompt, end="", file=sys.stderr, flush=True)
-    return input()
+    try:
+        return input()
+    except EOFError:
+        # `git diff | qp -e …`: stdin was the piped prompt and is exhausted,
+        # so the answer has to come from the terminal itself.
+        try:
+            tty = _open_tty()
+        except OSError:
+            raise EOFError from None
+        with tty:
+            line = tty.readline()
+        if not line:
+            raise EOFError from None
+        return line.rstrip("\n")
 
 
 def _confirm(prompt: str) -> bool:
@@ -32,6 +63,17 @@ def _truncate(text: str, limit: int = _MAX_OUTPUT_CHARS) -> str:
     if len(text) <= limit:
         return text
     return text[:limit] + "\n...[truncated]"
+
+
+def _truncate_middle(text: str, limit: int = _MAX_OUTPUT_CHARS) -> str:
+    """Keep the start and — mostly — the end of a command's output: errors
+    and summaries are at the bottom, the top says what was running."""
+    if len(text) <= limit:
+        return text
+    head = limit // 4
+    tail = limit - head
+    dropped = len(text) - limit
+    return f"{text[:head]}\n...[{dropped} characters truncated]...\n{text[-tail:]}"
 
 
 def run_shell(args: dict) -> str:
@@ -51,7 +93,7 @@ def run_shell(args: dict) -> str:
     except subprocess.TimeoutExpired:
         return "Error: command timed out after 120s."
     output = (result.stdout + result.stderr).strip()
-    output = _truncate(output)
+    output = _truncate_middle(output)
     return output or f"(exit code {result.returncode}, no output)"
 
 

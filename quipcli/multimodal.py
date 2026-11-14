@@ -85,7 +85,7 @@ def _build_user_content(
             detected.add("video")
 
     for f in extra_files or []:
-        p = Path(f)
+        p = Path(f).expanduser()
         if not p.is_file():
             print(f"Warning: input file not found: {f}", file=sys.stderr)
         elif p.suffix.lower() in _MEDIA_EXTENSIONS:
@@ -101,7 +101,7 @@ def _build_user_content(
             )
 
     for word in words:
-        p = Path(word)
+        p = Path(word).expanduser()
         if p.suffix.lower() in _MEDIA_EXTENSIONS and p.exists():
             _add_file(p)
         elif _is_image_url(word):

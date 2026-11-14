@@ -12,6 +12,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 import quipcli
+import quipcli.shellinit
 from quipcli import (
     _build_user_content,
     _is_image_url,
@@ -26,6 +27,17 @@ from quipcli import (
 )
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+
+@pytest.fixture(autouse=True)
+def _no_real_terminal():
+    """Tests never talk to the terminal pytest was started from: no /dev/tty
+    for confirm prompts, no per-terminal "current session" scope."""
+    with (
+        patch("quipcli.tools._open_tty", side_effect=OSError),
+        patch("quipcli.db._terminal_scope", return_value=None),
+    ):
+        yield
 
 
 class MockHTTPResponse:
@@ -224,7 +236,7 @@ class TestParser:
         assert "not allowed with" in capsys.readouterr().err
 
     def test_max_steps_default(self):
-        assert build_parser().parse_args(["hi"]).max_steps == 12
+        assert build_parser().parse_args(["hi"]).max_steps == 4
 
     def test_max_steps_flag(self):
         args = build_parser().parse_args(["-a", "--max-steps", "5", "do it"])
@@ -2423,6 +2435,21 @@ class TestSessions:
         ):
             quipcli._record_message("mm", "user", multimodal, None, None, "chat")
             msgs = quipcli._get_session_messages("mm")
+        # Inline (base64) attachments are not kept: replaying them would
+        # re-send — and re-bill — the whole file on every later turn.
+        assert msgs[0]["content"] == "describe\n\n[attachment: image — not kept]"
+
+    def test_remote_image_url_round_trip(self, tmp_path):
+        multimodal = [
+            {"type": "text", "text": "describe"},
+            {"type": "image_url", "image_url": {"url": "https://x.test/a.png"}},
+        ]
+        with (
+            patch("quipcli.constants._HISTORY_DB", tmp_path / "history.db"),
+            patch("quipcli.constants._DATA_DIR", tmp_path),
+        ):
+            quipcli._record_message("mm", "user", multimodal, None, None, "chat")
+            msgs = quipcli._get_session_messages("mm")
         assert msgs[0]["content"] == multimodal
 
 
@@ -3668,15 +3695,18 @@ class TestInteractive:
         assert turn.call_count == 2
 
     def test_execute_mode_confirms_without_exiting(self, isolated_db):
-        with (
-            patch("quipcli.turn.run_confirmed", return_value=0) as confirmed,
-            patch("quipcli.turn.confirm_and_run") as one_shot,
-        ):
-            self._run(
+        outcome = quipcli.execute._Outcome("ls -la", 0)
+        with patch("quipcli.turn.confirm_command", return_value=outcome) as confirmed:
+            session, _, _ = self._run(
                 ["list files", EOFError()], [_sse_answer("ls -la")], mode="execute"
             )
-        confirmed.assert_called_once_with("ls -la", "list files")
-        one_shot.assert_not_called()
+        assert confirmed.call_args[0] == ("ls -la", "list files")
+        # no SystemExit: the loop went on to read the next (EOF) input, and
+        # the outcome is noted for the following turns
+        assert session.messages[-1] == {
+            "role": "note",
+            "content": "(The user ran the command: exit status 0.)",
+        }
 
     def test_resumed_session_shows_recent_messages(self, isolated_db, capsys):
         session = quipcli.db._Session(
@@ -4011,3 +4041,486 @@ class TestModelsTuiRouting:
         ):
             quipcli.main()
         view.assert_called_once()
+
+
+# ── Follow-up (-f): last exchange, inherited mode, per-terminal session ──────
+
+
+class TestFollowUp:
+    @pytest.fixture
+    def db(self, tmp_path):
+        with (
+            patch("quipcli.constants._HISTORY_DB", tmp_path / "history.db"),
+            patch("quipcli.constants._DATA_DIR", tmp_path),
+        ):
+            yield tmp_path
+
+    def _send(self, session, prompt, answer="ok", mode="chat"):
+        quipcli._save_session(session, prompt)
+        quipcli._record_message(session.id, "user", prompt, None, None, mode)
+        quipcli._record_message(session.id, "assistant", answer, "m", None, mode)
+
+    def test_last_exchanges_keeps_from_last_user_prompt(self):
+        msgs = [
+            {"role": "user", "content": "q1"},
+            {"role": "assistant", "content": "a1"},
+            {"role": "user", "content": "q2"},
+            {"role": "assistant", "content": "a2"},
+            {"role": "note", "content": "(ran)"},
+        ]
+        assert quipcli.db._last_exchanges(msgs, 1) == msgs[2:]
+        assert quipcli.db._last_exchanges(msgs, 2) == msgs
+        assert quipcli.db._last_exchanges(msgs, 5) == msgs
+        assert quipcli.db._last_exchanges(msgs, 0) == msgs
+        assert quipcli.db._last_exchanges(msgs, None) == msgs
+
+    def test_follow_up_resends_only_last_exchange(self, db, capsys):
+        a = quipcli._resolve_session(None, False)
+        self._send(a, "first topic", "a1")
+        self._send(a, "second topic", "a2")
+        session = quipcli._resolve_session(None, follow_up=True, follow_exchanges=1)
+        assert [m["content"] for m in session.messages] == ["second topic", "a2"]
+        assert "last 2 of 4 messages" in capsys.readouterr().err
+
+    def test_follow_limit_config(self):
+        assert quipcli.turn._follow_limit({}) == 1
+        assert quipcli.turn._follow_limit({"follow_history": 3}) == 3
+        assert quipcli.turn._follow_limit({"follow_history": 0}) == 0
+        assert quipcli.turn._follow_limit({"follow_history": "x"}) == 1
+
+    def test_last_mode(self, db):
+        a = quipcli._resolve_session(None, False)
+        assert quipcli.db._last_mode(a.id) is None
+        self._send(a, "list files", "ls", mode="execute")
+        quipcli._record_message(a.id, "note", "(ran)", None, None, "execute")
+        assert quipcli.db._last_mode(a.id) == "execute"
+
+    def test_current_session_is_per_terminal(self, db):
+        a = quipcli._resolve_session(None, False)
+        b = quipcli._resolve_session(None, False)
+        with patch("quipcli.db._terminal_scope", return_value="/dev/pts/1:10"):
+            self._send(a, "asked in the first terminal")
+        with patch("quipcli.db._terminal_scope", return_value="/dev/pts/2:20"):
+            self._send(b, "asked in the second terminal")
+            assert quipcli._current_session_id() == b.id
+        with patch("quipcli.db._terminal_scope", return_value="/dev/pts/1:10"):
+            assert quipcli._current_session_id() == a.id
+        # a terminal that never asked anything falls back to the last used
+        with patch("quipcli.db._terminal_scope", return_value="/dev/pts/9:90"):
+            assert quipcli._current_session_id() == b.id
+        assert quipcli._current_session_id() == b.id  # no terminal at all
+
+    def test_old_terminal_entries_are_pruned(self, db):
+        a = quipcli._resolve_session(None, False)
+        with patch("quipcli.db._terminal_scope", return_value="old:1"):
+            self._send(a, "long ago")
+        with quipcli.db._db_conn() as conn:
+            conn.execute("UPDATE terminals SET ts = ts - 40 * 86400")
+        with patch("quipcli.db._terminal_scope", return_value="new:2"):
+            quipcli._set_current_session(a.id)
+        with quipcli.db._db_conn() as conn:
+            scopes = [r[0] for r in conn.execute("SELECT scope FROM terminals")]
+        assert scopes == ["new:2"]
+
+
+class TestForRequest:
+    def test_note_is_merged_into_the_next_user_turn(self):
+        msgs = [
+            {"role": "user", "content": "list files"},
+            {"role": "assistant", "content": "ls"},
+            {"role": "note", "content": "(The user ran the command: exit status 2.)"},
+            {"role": "user", "content": "why did it fail"},
+        ]
+        assert quipcli.turn._for_request(msgs) == [
+            {"role": "user", "content": "list files"},
+            {"role": "assistant", "content": "ls"},
+            {
+                "role": "user",
+                "content": "(The user ran the command: exit status 2.)\n\n"
+                "why did it fail",
+            },
+        ]
+
+    def test_text_follows_multimodal_user_turn(self):
+        image = {"type": "image_url", "image_url": {"url": "https://x.test/a.png"}}
+        msgs = [
+            {"role": "user", "content": [image]},
+            {"role": "user", "content": "and this"},
+        ]
+        assert quipcli.turn._for_request(msgs) == [
+            {"role": "user", "content": [image, {"type": "text", "text": "and this"}]}
+        ]
+
+    def test_does_not_mutate_the_session(self):
+        msgs = [
+            {"role": "note", "content": "n"},
+            {"role": "user", "content": "q"},
+        ]
+        quipcli.turn._for_request(msgs)
+        assert msgs[0] == {"role": "note", "content": "n"}
+
+
+class TestFollowUpDispatch:
+    """`qp -e …` then `qp -f …`, end to end through main()."""
+
+    def _isolate(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(quipcli.constants, "_CONFIG_DIR", tmp_path)
+        monkeypatch.setattr(quipcli.constants, "_CONFIG_FILE", tmp_path / "config.json")
+        monkeypatch.setattr(
+            quipcli.constants, "_MODELS_CACHE", tmp_path / "models.json"
+        )
+        monkeypatch.setattr(quipcli.constants, "_HISTORY_DB", tmp_path / "history.db")
+        monkeypatch.setattr(quipcli.constants, "_DATA_DIR", tmp_path)
+
+    def _main(self, monkeypatch, argv, answers, inputs=()):
+        monkeypatch.setattr(sys, "argv", ["qp", *argv])
+        conns = [_mock_conn(_sse_answer(a)) for a in answers]
+        run = MagicMock(return_value=MagicMock(returncode=3))
+        with (
+            patch("subprocess.Popen"),
+            patch("http.client.HTTPSConnection", side_effect=conns),
+            patch("quipcli.constants._API_KEY", "key"),
+            patch("builtins.input", side_effect=list(inputs)),
+            patch("quipcli.execute.subprocess.run", run),
+        ):
+            try:
+                quipcli.main()
+                code = None
+            except SystemExit as e:
+                code = e.code
+        bodies = [json.loads(c.request.call_args[0][2]) for c in conns]
+        return code, bodies, run
+
+    def test_follow_up_inherits_execute_mode_and_sees_the_outcome(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        self._isolate(tmp_path, monkeypatch)
+        code, _, run = self._main(monkeypatch, ["-e", "list files"], ["ls"], ["y"])
+        assert code == 3
+        run.assert_called_once_with("ls", check=False, shell=True)
+
+        code, bodies, _ = self._main(
+            monkeypatch, ["-f", "hidden", "ones", "too"], ["ls -a"], ["n"]
+        )
+        assert code == 0
+        messages = bodies[0]["messages"]
+        assert "shell command generator" in messages[0]["content"]  # execute mode
+        assert [m["content"] for m in messages[1:]] == [
+            "list files",
+            "ls",
+            "(The user ran the command: exit status 3.)\n\nhidden ones too",
+        ]
+        assert "Mode: execute" in capsys.readouterr().err
+
+    def test_chat_flag_overrides_inherited_mode(self, tmp_path, monkeypatch, capsys):
+        self._isolate(tmp_path, monkeypatch)
+        self._main(monkeypatch, ["-e", "list files"], ["ls"], ["n"])
+        code, bodies, run = self._main(
+            monkeypatch, ["-f", "-C", "why", "that", "one"], ["because"]
+        )
+        assert code is None
+        run.assert_not_called()
+        messages = bodies[0]["messages"]
+        assert "shell command generator" not in messages[0]["content"]
+        assert messages[-1]["content"] == (
+            "(The user did not run the command.)\n\nwhy that one"
+        )
+
+    def test_follow_up_sends_only_the_last_exchange(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        self._main(monkeypatch, ["first", "question"], ["a1"])
+        self._main(monkeypatch, ["-f", "second", "question"], ["a2"])
+        _, bodies, _ = self._main(monkeypatch, ["-f", "third", "question"], ["a3"])
+        assert [m["content"] for m in bodies[0]["messages"][1:]] == [
+            "second question",
+            "a2",
+            "third question",
+        ]
+
+    def test_revise_asks_the_model_again_with_the_feedback(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        self._isolate(tmp_path, monkeypatch)
+        code, bodies, run = self._main(
+            monkeypatch,
+            ["-e", "copy", "the", "folder"],
+            ["cp -r a b", "rsync -a a/ b/"],
+            ["r", "use rsync", "y"],
+        )
+        assert code == 3
+        run.assert_called_once_with("rsync -a a/ b/", check=False, shell=True)
+        assert [m["content"] for m in bodies[1]["messages"][1:]] == [
+            "copy the folder",
+            "cp -r a b",
+            "use rsync",
+        ]
+        assert "[Y/n/e/r]" in capsys.readouterr().err
+
+
+class TestConfirmCommand:
+    def test_edit_marks_the_outcome_as_edited(self):
+        with (
+            patch("quipcli.execute._ask", side_effect=["e", "y"]),
+            patch("quipcli.execute._edit_in_editor", return_value="ls -a"),
+            patch("quipcli.execute.subprocess.run") as run,
+        ):
+            run.return_value.returncode = 0
+            outcome = quipcli.execute.confirm_command("ls", "list")
+        assert (outcome.command, outcome.status, outcome.edited) == ("ls -a", 0, True)
+        assert "edited the command to `ls -a`" in outcome.note()
+
+    def test_revise_only_offered_with_a_callback(self):
+        with patch("quipcli.execute._ask", return_value="r") as ask:
+            outcome = quipcli.execute.confirm_command("ls", "list")
+        assert outcome.status is None  # `r` without a callback = any other key
+        ask.assert_called_once_with("Run this command? [Y/n/e] ")
+
+    def test_empty_feedback_keeps_the_command(self):
+        revise = MagicMock()
+        with patch("quipcli.execute._ask", side_effect=["r", "  ", "n"]):
+            outcome = quipcli.execute.confirm_command("ls", "list", revise)
+        revise.assert_not_called()
+        assert outcome.command == "ls"
+
+
+# ── Confirm prompts when stdin is a pipe ──────────────────────────────────────
+
+
+class TestAskOnTerminal:
+    def test_falls_back_to_the_terminal_when_stdin_is_spent(self, tmp_path):
+        tty = tmp_path / "tty"
+        tty.write_text("y\n")
+        with (
+            patch("builtins.input", side_effect=EOFError),
+            patch("quipcli.tools._open_tty", side_effect=lambda: tty.open()),
+        ):
+            assert quipcli.tools._ask("Run? ") == "y"
+
+    def test_no_terminal_is_still_eof(self):
+        with patch("builtins.input", side_effect=EOFError), pytest.raises(EOFError):
+            quipcli.tools._ask("Run? ")
+
+    def test_closed_terminal_is_eof(self, tmp_path):
+        tty = tmp_path / "tty"
+        tty.write_text("")
+        with (
+            patch("builtins.input", side_effect=EOFError),
+            patch("quipcli.tools._open_tty", side_effect=lambda: tty.open()),
+            pytest.raises(EOFError),
+        ):
+            quipcli.tools._ask("Run? ")
+
+    def test_command_gets_the_terminal_as_stdin_when_ours_is_a_pipe(self, tmp_path):
+        tty = tmp_path / "tty"
+        tty.write_text("")
+        with (
+            patch("sys.stdin.isatty", return_value=False),
+            patch("quipcli.tools._open_tty", side_effect=lambda: tty.open()),
+            patch("quipcli.execute._ask", return_value="y"),
+            patch("quipcli.execute.subprocess.run") as run,
+        ):
+            run.return_value.returncode = 0
+            quipcli.execute.run_confirmed("cat", "p")
+        assert run.call_args.kwargs["stdin"].name == str(tty)
+
+    def test_terminal_stdin_is_left_alone(self):
+        with (
+            patch("sys.stdin.isatty", return_value=True),
+            patch("quipcli.execute._ask", return_value="y"),
+            patch("quipcli.execute.subprocess.run") as run,
+        ):
+            run.return_value.returncode = 0
+            quipcli.execute.run_confirmed("cat", "p")
+        run.assert_called_once_with("cat", check=False, shell=True)
+
+
+# ── Agent tuning ──────────────────────────────────────────────────────────────
+
+
+class TestAgentTuning:
+    def test_shell_output_keeps_the_end(self):
+        text = "START" + "x" * 10000 + "the actual error"
+        result = quipcli.tools._truncate_middle(text, 4000)
+        assert result.startswith("START")
+        assert result.endswith("the actual error")
+        assert "characters truncated" in result
+        assert len(result) < 4100
+
+    def test_short_output_is_untouched(self):
+        assert quipcli.tools._truncate_middle("short", 4000) == "short"
+
+    def test_steps_wait_longer_than_streamed_calls(self):
+        resp = MockHTTPResponse(
+            200, json.dumps({"choices": [{"message": {"content": "done"}}]}).encode()
+        )
+        with (
+            patch("http.client.HTTPSConnection") as cls,
+            patch("quipcli.constants._API_KEY", "key"),
+        ):
+            cls.return_value = _mock_conn(resp)
+            quipcli.run_agent_loop(
+                [{"role": "user", "content": "x"}], "m", render_markdown=False
+            )
+        assert cls.call_args.kwargs["timeout"] == quipcli.agent._STEP_TIMEOUT > 30
+
+    def test_silent_server_is_not_retried(self, capsys):
+        conn = MagicMock()
+        conn.getresponse.side_effect = TimeoutError
+        with (
+            patch("http.client.HTTPSConnection", return_value=conn) as cls,
+            patch("quipcli.constants._API_KEY", "key"),
+            patch("quipcli.http_client._ollama_models") as ollama,
+            patch("time.sleep"),
+            pytest.raises(SystemExit),
+        ):
+            quipcli._make_request([{"role": "user", "content": "x"}], "m", stream=False)
+        assert cls.call_count == 1  # sent once: a retry could be billed twice
+        ollama.assert_not_called()  # and no Ollama fallback either
+        assert "no response after 30s" in capsys.readouterr().err
+
+    def test_connect_failure_is_still_retried(self):
+        conn = MagicMock()
+        conn.request.side_effect = TimeoutError
+        with (
+            patch("http.client.HTTPSConnection", return_value=conn) as cls,
+            patch("quipcli.constants._API_KEY", "key"),
+            patch("quipcli.http_client._ollama_models", return_value=None),
+            patch("time.sleep"),
+            pytest.raises(SystemExit),
+        ):
+            quipcli._make_request([{"role": "user", "content": "x"}], "m", stream=False)
+        assert cls.call_count == 4
+
+
+# ── Raw-line shell integration ────────────────────────────────────────────────
+
+
+class TestSplitRaw:
+    def _split(self, line):
+        return quipcli.shellinit._split_raw(line, build_parser())
+
+    def test_prompt_is_passed_after_double_dash(self):
+        assert self._split("what's up; any idea?") == [
+            "--",
+            "what's",
+            "up;",
+            "any",
+            "idea?",
+        ]
+
+    def test_leading_flags_and_values(self):
+        assert self._split("-e -m haiku list files -la") == [
+            "-e",
+            "-m",
+            "haiku",
+            "--",
+            "list",
+            "files",
+            "-la",
+        ]
+
+    def test_quoted_flag_value(self):
+        argv = self._split("-P \"you're a pirate\" -i 'my file.png' tell a joke")
+        args = build_parser().parse_args(argv)
+        assert args.system == "you're a pirate"
+        assert args.input == ["my file.png"]
+        assert args.words == ["tell", "a", "joke"]
+
+    def test_flags_only(self):
+        assert self._split("--status") == ["--status"]
+        assert self._split("--cost 30d") == ["--cost", "30d"]
+        assert self._split("--model-set") == ["--model-set"]
+        assert self._split("") == []
+
+    def test_optional_value_flag_does_not_eat_a_flag(self):
+        assert self._split("--cost -q") == ["--cost", "-q"]
+
+    def test_dashed_words_in_the_prompt_are_not_flags(self):
+        args = build_parser().parse_args(self._split("what does ls -la --color do"))
+        assert args.words == ["what", "does", "ls", "-la", "--color", "do"]
+
+    def test_main_accepts_a_raw_line(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(quipcli.constants, "_CONFIG_DIR", tmp_path)
+        monkeypatch.setattr(quipcli.constants, "_CONFIG_FILE", tmp_path / "config.json")
+        monkeypatch.setattr(
+            quipcli.constants, "_MODELS_CACHE", tmp_path / "models.json"
+        )
+        monkeypatch.setattr(quipcli.constants, "_HISTORY_DB", tmp_path / "history.db")
+        monkeypatch.setattr(quipcli.constants, "_DATA_DIR", tmp_path)
+        monkeypatch.setattr(sys, "argv", ["qp", "--raw", "-q what's up; ok?"])
+        conn = _mock_conn(_sse_answer("fine"))
+        with (
+            patch("subprocess.Popen"),
+            patch("http.client.HTTPSConnection", return_value=conn),
+            patch("quipcli.constants._API_KEY", "key"),
+        ):
+            quipcli.main()
+        body = json.loads(conn.request.call_args[0][2])
+        assert body["messages"][-1]["content"] == "what's up; ok?"
+
+
+class TestShellInit:
+    """The bash side: its rewrite function is plain string logic, so it runs
+    here in a non-interactive bash with READLINE_LINE set by hand."""
+
+    def _rewrite(self, line, env=None):
+        script = (
+            quipcli.shellinit.shell_init("bash")
+            + '\nREADLINE_LINE=$1; _qp_raw_rewrite; printf %s "$READLINE_LINE"'
+        )
+        return subprocess.run(
+            ["bash", "-c", script, "bash", line],
+            capture_output=True,
+            text=True,
+            check=True,
+            env={**os.environ, **(env or {})},
+        ).stdout
+
+    @pytest.mark.parametrize(
+        "line,expected",
+        [
+            ("qp what's up; any idea?", "qp --raw 'what'\\''s up; any idea?'"),
+            ("qp plain words only", "qp plain words only"),
+            ("qp --status", "qp --status"),
+            ("ls -la", "ls -la"),
+            ("qpx what's", "qpx what's"),
+            ("qp isn't it | less", "qp --raw 'isn'\\''t it' | less"),
+            ("qp sum it's > out.md", "qp --raw 'sum it'\\''s' > out.md"),
+            ("git diff | qp what's wrong", "git diff | qp --raw 'what'\\''s wrong'"),
+            ("qp --raw 'done already'", "qp --raw 'done already'"),
+        ],
+    )
+    def test_rewrite(self, line, expected):
+        assert self._rewrite(line) == expected
+
+    def test_pipes_can_be_made_literal(self):
+        assert self._rewrite("qp what is a | b?", {"QP_RAW_PIPES": "0"}) == (
+            "qp --raw 'what is a | b?'"
+        )
+
+    def test_rewritten_line_reaches_qp_intact(self):
+        rewritten = self._rewrite("qp what's (really) up; $HOME & co?")
+        out = subprocess.run(
+            ["bash", "-c", f'qp() {{ printf "%s\\n" "$@"; }}; {rewritten}'],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+        assert out == "--raw\nwhat's (really) up; $HOME & co?\n"
+
+    def test_flag_prints_the_script(self, monkeypatch, tmp_path, capsys):
+        monkeypatch.setattr(quipcli.constants, "_CONFIG_DIR", tmp_path)
+        monkeypatch.setattr(quipcli.constants, "_CONFIG_FILE", tmp_path / "config.json")
+        monkeypatch.setattr(
+            quipcli.constants, "_MODELS_CACHE", tmp_path / "models.json"
+        )
+        monkeypatch.setattr(sys, "argv", ["qp", "--shell-init", "bash"])
+        with patch("subprocess.Popen"):
+            quipcli.main()
+        assert "_qp_raw_rewrite" in capsys.readouterr().out
+
+
+class TestLazyImports:
+    def test_importing_quipcli_does_not_import_prompt_toolkit(self):
+        code = "import sys, quipcli; sys.exit('prompt_toolkit' in sys.modules)"
+        assert subprocess.run([sys.executable, "-c", code], check=False).returncode == 0

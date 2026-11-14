@@ -1,4 +1,5 @@
 import json
+import os
 import re
 import secrets
 import sqlite3
@@ -76,6 +77,13 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         )
     """)
     conn.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS terminals (
+            scope      TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            ts         REAL NOT NULL
+        )
+    """)
     _migrate_legacy_sessions(conn)
     conn.commit()
 
@@ -147,6 +155,7 @@ def _record_message(
     stats: _UsageStats | None,
     mode: str | None,
 ) -> None:
+    content = _strip_media(content)
     content_str = json.dumps(content) if isinstance(content, list) else content
     try:
         with _db_conn() as conn:
@@ -249,6 +258,63 @@ def _text_of(content: str) -> str:
     return content
 
 
+_MEDIA_KINDS = {"image_url": "image", "video_url": "video", "input_audio": "audio"}
+
+
+def _strip_media(content: str | list) -> str | list:
+    """Replace inline (base64) attachments with a short text marker: history
+    keeps what was said, not megabytes that would be re-sent — and re-billed —
+    on every later turn. Remote image URLs are kept, they cost nothing to
+    store. A list left with only text parts collapses to a plain string."""
+    if not isinstance(content, list):
+        return content
+    parts: list[dict] = []
+    for part in content:
+        kind = part.get("type") if isinstance(part, dict) else None
+        if kind == "text":
+            parts.append(part)
+        elif kind == "file":
+            name = (part.get("file") or {}).get("filename") or "file"
+            parts.append({"type": "text", "text": f"[attachment: {name} — not kept]"})
+        elif kind in _MEDIA_KINDS:
+            url = (part.get(kind) or {}).get("url", "")
+            if kind == "image_url" and not url.startswith("data:"):
+                parts.append(part)
+            else:
+                label = _MEDIA_KINDS[kind]
+                parts.append(
+                    {"type": "text", "text": f"[attachment: {label} — not kept]"}
+                )
+        else:
+            parts.append(part)
+    if all(isinstance(p, dict) and p.get("type") == "text" for p in parts):
+        return "\n\n".join(p.get("text", "") for p in parts)
+    return parts
+
+
+def _last_exchanges(messages: list[dict], count: int | None) -> list[dict]:
+    """The last `count` exchanges (all if falsy): everything from the
+    `count`-th last user prompt on — its reply and any command-result note."""
+    if not count:
+        return messages
+    starts = [i for i, m in enumerate(messages) if m["role"] == "user"]
+    return messages[starts[-count] :] if len(starts) >= count else messages
+
+
+def _last_mode(session_id: str) -> str | None:
+    """Mode of the session's last reply — what a bare `-f` inherits."""
+    try:
+        with _db_conn() as conn:
+            row = conn.execute(
+                "SELECT mode FROM messages WHERE session_id=? AND role='assistant'"
+                " ORDER BY ts DESC, id DESC LIMIT 1",
+                (session_id,),
+            ).fetchone()
+    except sqlite3.Error, OSError:
+        return None
+    return row[0] if row else None
+
+
 def _get_session_messages(session_id: str, limit: int | None = None) -> list[dict]:
     """Messages of a session, oldest first. With `limit`, only the last
     `limit` ones, trimmed so the history starts on a user turn."""
@@ -267,7 +333,9 @@ def _get_session_messages(session_id: str, limit: int | None = None) -> list[dic
         try:
             parsed = json.loads(content)
             if isinstance(parsed, list):
-                result.append({"role": role, "content": parsed})
+                # _strip_media: rows written before attachments were dropped
+                # at record time still hold base64 — never replay it.
+                result.append({"role": role, "content": _strip_media(parsed)})
                 continue
         except json.JSONDecodeError, ValueError:
             pass
@@ -286,15 +354,54 @@ def _trim_history(messages: list[dict], limit: int | None) -> list[dict]:
     return kept
 
 
+_TERMINAL_TTL = 30 * 86400  # forget a terminal's current session after 30 days
+
+
+def _terminal_scope() -> str | None:
+    """Identifies the terminal `qp` runs in — its tty plus the shell session
+    that owns it — so `-f` continues what was asked *here*, not in another
+    window or tmux pane. None when there is no terminal (scripts, cron)."""
+    for fd in (2, 0, 1):
+        try:
+            return f"{os.ttyname(fd)}:{os.getsid(0)}"
+        except OSError:
+            continue
+    return None
+
+
+def _mark_current(conn: sqlite3.Connection, session_id: str) -> None:
+    conn.execute(
+        "INSERT OR REPLACE INTO meta(key,value) VALUES('current',?)", (session_id,)
+    )
+    scope = _terminal_scope()
+    if scope:
+        now = time.time()
+        conn.execute(
+            "INSERT OR REPLACE INTO terminals(scope,session_id,ts) VALUES(?,?,?)",
+            (scope, session_id, now),
+        )
+        conn.execute("DELETE FROM terminals WHERE ts < ?", (now - _TERMINAL_TTL,))
+
+
 def _current_session_id() -> str | None:
+    """This terminal's current session, else the globally last used one."""
     if not constants._HISTORY_DB.exists():
         return None
+    scope = _terminal_scope()
     try:
         with _db_conn() as conn:
-            row = conn.execute(
-                "SELECT s.id FROM meta JOIN sessions s ON s.id = meta.value"
-                " WHERE meta.key='current'"
-            ).fetchone()
+            row = None
+            if scope:
+                row = conn.execute(
+                    "SELECT s.id FROM terminals t JOIN sessions s"
+                    " ON s.id = t.session_id WHERE t.scope=?",
+                    (scope,),
+                ).fetchone()
+            if not row:
+                row = conn.execute(
+                    "SELECT s.id FROM meta JOIN sessions s ON s.id = meta.value"
+                    " WHERE meta.key='current'"
+                ).fetchone()
             if not row:
                 row = conn.execute(
                     "SELECT session_id FROM messages ORDER BY ts DESC, id DESC LIMIT 1"
@@ -307,10 +414,7 @@ def _current_session_id() -> str | None:
 def _set_current_session(session_id: str) -> None:
     try:
         with _db_conn() as conn:
-            conn.execute(
-                "INSERT OR REPLACE INTO meta(key,value) VALUES('current',?)",
-                (session_id,),
-            )
+            _mark_current(conn, session_id)
     except sqlite3.Error, OSError:
         pass
 
@@ -409,10 +513,7 @@ def _save_session(session: _Session, prompt_text: str) -> None:
                     (session.id, session.name, time.time()),
                 )
                 session.is_new = False
-            conn.execute(
-                "INSERT OR REPLACE INTO meta(key,value) VALUES('current',?)",
-                (session.id,),
-            )
+            _mark_current(conn, session.id)
     except sqlite3.Error, OSError:
         pass
 
@@ -431,7 +532,10 @@ def _resolve_session(
     follow_up: bool,
     quiet: bool = False,
     history_limit: int | None = None,
+    follow_exchanges: int | None = None,
 ) -> _Session:
+    """`follow_exchanges` narrows what `-f` resends to the last N exchanges
+    (one-shot `qp -f`); None keeps the whole `history_limit` window."""
     if session_arg and follow_up:
         print(
             "Error: --session and --follow-up are mutually exclusive.", file=sys.stderr
@@ -448,8 +552,13 @@ def _resolve_session(
         if not sid or not found:
             print("Error: no previous session found.", file=sys.stderr)
             sys.exit(1)
-        session = _Session(sid, found[0], _get_session_messages(sid, history_limit))
-        _announce(session, f" · {found[1]} messages")
+        messages = _get_session_messages(sid, history_limit)
+        kept = _last_exchanges(messages, follow_exchanges)
+        session = _Session(sid, found[0], kept)
+        if len(kept) < found[1]:
+            _announce(session, f" · last {len(kept)} of {found[1]} messages")
+        else:
+            _announce(session, f" · {found[1]} messages")
         return session
 
     if session_arg is None:

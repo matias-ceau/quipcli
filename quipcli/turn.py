@@ -2,6 +2,7 @@
 interactive session (`-t`)."""
 
 import os
+import sys
 from dataclasses import dataclass
 
 from . import constants
@@ -10,7 +11,7 @@ from .cli import _print_stats
 from .config import _load_config
 from .context import _machine_context
 from .db import _record_message, _record_usage, _save_session, _Session, _trim_history
-from .execute import confirm_and_run, run_confirmed
+from .execute import _strip_fences, confirm_command
 from .http_client import call_llm_streaming
 
 MODES = ("chat", "code", "execute", "agent")
@@ -42,13 +43,44 @@ def _history_limit(cfg: dict) -> int | None:
     return value if isinstance(value, int) else constants.SESSION_HISTORY
 
 
+def _follow_limit(cfg: dict) -> int | None:
+    """How many past exchanges a one-shot `qp -f` resends (0 → no narrowing,
+    the whole `session_history` window)."""
+    value = cfg.get("follow_history", constants.FOLLOW_HISTORY)
+    return value if isinstance(value, int) else constants.FOLLOW_HISTORY
+
+
+def _for_request(messages: list[dict]) -> list[dict]:
+    """Session history as API messages: a command-result `note` becomes user
+    text, and consecutive user texts are merged — providers expect user and
+    assistant turns to alternate."""
+    out: list[dict] = []
+    for message in messages:
+        role = "user" if message["role"] == "note" else message["role"]
+        content = message["content"]
+        last = out[-1] if out else None
+        if (
+            last
+            and role == "user"
+            and last["role"] == "user"
+            and isinstance(content, str)
+        ):
+            if isinstance(last["content"], str):
+                last["content"] = f"{last['content']}\n\n{content}"
+            else:
+                last["content"] = [*last["content"], {"type": "text", "text": content}]
+            continue
+        out.append({"role": role, "content": content})
+    return out
+
+
 @dataclass
 class TurnOptions:
     model: str
     mode: str = "chat"
     reasoning: str | None = None  # -r; None → config, then model default
     system: str | None = None  # -P: replaces the whole default system prompt
-    max_steps: int = 12
+    max_steps: int = 4
     web: bool = True
     quiet: bool = False
     show_stats: bool = True
@@ -63,22 +95,24 @@ def _default_system(cfg: dict, mode: str) -> str | None:
     return "\n\n".join(parts) if parts else None
 
 
-def run_turn(
+def _exchange(
     opts: TurnOptions,
     session: _Session,
     user_content: str | list[dict],
     prompt_text: str,
-    interactive: bool = False,
 ) -> str:
     """Send one prompt with the session's history, record both messages and
-    append them to `session.messages`. In execute mode, then confirm + run the
-    command (one-shot: exit with its status; interactive: just return)."""
+    append them to `session.messages`."""
     cfg = _load_config()
     extra = _reasoning_extra(opts.reasoning, cfg)
     system = opts.system or _default_system(cfg, opts.mode)
     msgs: list[dict] = [{"role": "system", "content": system}] if system else []
-    msgs += _trim_history(session.messages, _history_limit(cfg))
-    msgs.append({"role": "user", "content": user_content})
+    msgs += _for_request(
+        [
+            *_trim_history(session.messages, _history_limit(cfg)),
+            {"role": "user", "content": user_content},
+        ]
+    )
 
     if opts.mode == "agent":
         text, stats = run_agent_loop(
@@ -116,12 +150,40 @@ def run_turn(
         {"role": "user", "content": user_content},
         {"role": "assistant", "content": text},
     ]
+    return text
 
-    if opts.mode == "execute":
-        if interactive:
-            run_confirmed(text, prompt_text)
-        else:
-            confirm_and_run(text, prompt_text)
+
+def run_turn(
+    opts: TurnOptions,
+    session: _Session,
+    user_content: str | list[dict],
+    prompt_text: str,
+    interactive: bool = False,
+) -> str:
+    """One prompt → one reply (see _exchange). In execute mode, then confirm
+    + run the command and note the outcome in the session, so a follow-up
+    knows whether it ran and how it ended (one-shot: exit with its status;
+    interactive: just return)."""
+    text = _exchange(opts, session, user_content, prompt_text)
+    if opts.mode != "execute":
+        return text
+
+    if not interactive and not _strip_fences(text):
+        print("Error: no command to run.", file=sys.stderr)
+        sys.exit(1)
+    outcome = confirm_command(
+        text,
+        prompt_text,
+        # `r` at the confirm prompt: the feedback is just another exchange in
+        # the same session, answered with a new command.
+        revise=lambda feedback: _exchange(opts, session, feedback, feedback),
+    )
+    if outcome.command:
+        note = outcome.note()
+        _record_message(session.id, "note", note, None, None, "execute")
+        session.messages.append({"role": "note", "content": note})
+    if not interactive:
+        sys.exit(0 if outcome.status is None else outcome.status)
     return text
 
 
